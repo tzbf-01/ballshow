@@ -1,7 +1,7 @@
-2026-03-12 21:42:40,940 transreid INFO: Saving model in the path :logs/BallShow_vit_transreid_stride
-2026-03-12 21:42:40,940 transreid INFO: Namespace(config_file='configs/BallShow/vit_transreid_stride.yml', opts=['MODEL.DEVICE_ID', "('0')"], local_rank=0)
-2026-03-12 21:42:40,940 transreid INFO: Loaded configuration file configs/BallShow/vit_transreid_stride.yml
-2026-03-12 21:42:40,943 transreid INFO: 
+2026-03-14 16:02:20,595 transreid INFO: Saving model in the path :logs/BallShow_vit_transreid_stride
+2026-03-14 16:02:20,595 transreid INFO: Namespace(config_file='configs/BallShow/vit_transreid_stride.yml', opts=['MODEL.DEVICE_ID', "('0')"], local_rank=0)
+2026-03-14 16:02:20,595 transreid INFO: Loaded configuration file configs/BallShow/vit_transreid_stride.yml
+2026-03-14 16:02:20,595 transreid INFO: 
 MODEL:
   PRETRAIN_CHOICE: 'imagenet'
   PRETRAIN_PATH: './jx_vit_base_p16_224-80ecf9dd.pth'  # Ô¤ÑµÁ·È¨ÖØÂ·¾¶
@@ -62,7 +62,7 @@ OUTPUT_DIR: 'logs/BallShow_vit_transreid_stride'
 
 
 
-2026-03-12 21:42:40,943 transreid INFO: Running with config:
+2026-03-14 16:02:20,595 transreid INFO: Running with config:
 DATALOADER:
   NUM_INSTANCE: 4
   NUM_WORKERS: 8
@@ -141,5 +141,7 @@ TEST:
   NECK_FEAT: before
   RE_RANKING: False
   WEIGHT: 
-2026-03-12 21:42:43,633 transreid.train INFO: start training
-2026-03-12 21:47:16,105 transreid.train INFO: Epoch[1] Iteration[50/348] Loss: 10.694, Acc: 0.003, Base Lr: 1.66e-03
+2026-03-14 16:02:23,906 transreid.train INFO: start training
+2026-03-14 16:05:08,258 transreid.train INFO: Epoch[1] Iteration[50/348] Loss: 10.631, Acc: 0.002, Base Lr: 1.66e-03
+2026-03-14 16:07:31,059 transreid.train INFO: Epoch[1] Iteration[100/348] Loss: 9.932, Acc: 0.007, Base Lr: 1.66e-03
+2026-03-14 16:09:53,589 transreid.train INFO: Epoch[1] Iteration[150/348] Loss: 9.666, Acc: 0.013, Base Lr: 1.66e-03
