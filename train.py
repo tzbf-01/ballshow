@@ -10,6 +10,7 @@ import torch
 import numpy as np
 import os
 import argparse
+import codecs
 # from timm.scheduler import create_scheduler
 from config import cfg
 
@@ -35,7 +36,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.config_file != "":
-        cfg.merge_from_file(args.config_file)
+        with codecs.open(args.config_file, 'r', 'utf-8') as f:
+            cfg_str = f.read()
+            cfg.merge_from_other_cfg(cfg.load_cfg(cfg_str))   # 原代码：cfg.merge_from_file(args.config_file)
+        # 新代码：手动用UTF-8编码打开配置文件
     cfg.merge_from_list(args.opts)
     cfg.freeze()
 
@@ -54,7 +58,9 @@ if __name__ == '__main__':
 
     if args.config_file != "":
         logger.info("Loaded configuration file {}".format(args.config_file))
-        with open(args.config_file, 'r') as cf:
+        with open(args.config_file, 'r', encoding='utf-8') as cf:
+        # 原代码：with open(args.config_file, 'r') as cf:
+        # 新代码：添加encoding='utf-8'（Python 3+支持）
             config_str = "\n" + cf.read()
             logger.info(config_str)
     logger.info("Running with config:\n{}".format(cfg))

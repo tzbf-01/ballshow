@@ -1,12 +1,12 @@
 MODEL:
   PRETRAIN_CHOICE: 'imagenet'
-  PRETRAIN_PATH: ''  # 预训练权重路径
+  PRETRAIN_PATH: './jx_vit_base_p16_224-80ecf9dd.pth'  # 预训练权重路径
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'
   IF_WITH_CENTER: 'no'
   NAME: 'transformer'
   NO_MARGIN: True
-  DEVICE_ID: ('5')
+  DEVICE_ID: ('1')
   TRANSFORMER_TYPE: 'vit_base_patch16_224_TransReID'
   STRIDE_SIZE: [12, 12]
   SIE_CAMERA: True
@@ -25,7 +25,7 @@ INPUT:
 
 DATASETS:
   NAMES: ('ballshow')
-  ROOT_DIR: ('./data/BallShow')
+  ROOT_DIR: ('./data')
 
 DATALOADER:
   SAMPLER: 'softmax_triplet'
@@ -41,7 +41,7 @@ SOLVER:
   LARGE_FC_LR: False
   CHECKPOINT_PERIOD: 120
   LOG_PERIOD: 50
-  EVAL_PERIOD: 120
+  EVAL_PERIOD: 10
   WEIGHT_DECAY:  1e-4
   WEIGHT_DECAY_BIAS: 1e-4
   BIAS_LR_FACTOR: 2
