@@ -367,7 +367,7 @@ class TransReID(nn.Module):
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
-                insert_se=(i == 8)  # 仅第8层插入Token-SE（中层，兼顾纹理和语义）
+                insert_se=(i in [4, 8, 11])  # 关键修改：指定层级插入SE
             )
             for i in range(depth)])
         # （剩余原有代码不变）

@@ -1,4 +1,5 @@
 MODEL:
+  
   PRETRAIN_CHOICE: 'imagenet'
   PRETRAIN_PATH: './jx_vit_base_p16_224-80ecf9dd.pth'  # 预训练权重路径
   METRIC_LOSS_TYPE: 'triplet'
@@ -15,16 +16,17 @@ MODEL:
   JPM: True
   RE_ARRANGE: True
   # （原有参数不变，新增/修改以下）
-  DROP_PATH: 0.05  # 降低drop_path率，减少训练波动
-  SHUFFLE_GROUP: 4  # 降低shuffle组数，减少计算
+  DROP_PATH: 0.01  
+  SHUFFLE_GROUP: 8 
   SHIFT_NUM: 1
   DEVIDE_LENGTH: 4
+  
 
 INPUT:
   SIZE_TRAIN: [256, 128]
   SIZE_TEST: [256, 128]
   PROB: 0.5 # random horizontal flip
-  RE_PROB: 0.4 # random erasing
+  RE_PROB: 0.5 # random erasing
   PADDING: 10
   PIXEL_MEAN: [0.5, 0.5, 0.5]
   PIXEL_STD: [0.5, 0.5, 0.5]
@@ -40,10 +42,12 @@ DATALOADER:
 
 SOLVER:
   OPTIMIZER_NAME: 'SGD'
-  MAX_EPOCHS: 20
-  BASE_LR: 0.002
-  IMS_PER_BATCH: 32
-  WARMUP_METHOD: 'linear'
+  MAX_EPOCHS: 120
+  BASE_LR: 0.008
+  IMS_PER_BATCH: 128
+  WARMUP_EPOCHS: 10         # 新增warmup，稳定训练
+  WARMUP_METHOD: "linear"   # 新增：warmup方式
+  WARMUP_FACTOR: 0.01       # 新增：warmup初始学习率因子
   LARGE_FC_LR: False
   CHECKPOINT_PERIOD: 120
   LOG_PERIOD: 50

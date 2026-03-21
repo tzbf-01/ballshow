@@ -4,9 +4,10 @@ from .backbones.resnet import ResNet, Bottleneck
 import copy
 from .backbones.vit_pytorch import vit_base_patch16_224_TransReID, vit_small_patch16_224_TransReID, deit_small_patch16_224_TransReID
 from loss.metric_learning import Arcface, Cosface, AMSoftmax, CircleLoss
-# ========== 先导入MobileNetV3 ==========
-from torchvision.models import mobilenet_v3_small
+# ========== 先添加必要导入 ==========
 import torch.nn.functional as F
+from torchvision.models import resnet50
+from torchvision.models import ResNet50_Weights  # 兼容新版本PyTorch
 
 def shuffle_unit(features, shift, group, begin=1):
     """
@@ -251,7 +252,53 @@ class build_transformer(nn.Module):
 
 class build_transformer_local(nn.Module):
     def __init__(self, num_classes, camera_num, view_num, cfg, factory, rearrange):
-        super(build_transformer_local, self).__init__()
+        super().__init__()
+
+        # 1. 替换为ResNet50分支（完整特征提取，修复pretrained参数）
+        self.cnn_branch = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)  # 替代pretrained=True
+        self.cnn_branch = nn.Sequential(*list(self.cnn_branch.children())[:-2])  # 去掉平均池化和分类头
+        self.cnn_reduce = nn.Conv2d(2048, 256, kernel_size=1, bias=False)  # 2048→256降维
+        self.cnn_bn = nn.BatchNorm2d(256)
+        
+        # 2. 修复后的自适应加权融合（解决通道不匹配+维度变换错误）
+        class AdaptiveFusion(nn.Module):
+            def __init__(self, trans_dim=768, cnn_dim=256):
+                super().__init__()
+                self.trans_weight = nn.Parameter(torch.ones(1))  # 可学习权重
+                self.cnn_weight = nn.Parameter(torch.ones(1))
+                self.relu = nn.ReLU()  # 保证权重非负
+                self.l2_norm = nn.LayerNorm(trans_dim)  # 正则化
+                # 新增：CNN通道升维到768，匹配Transformer维度
+                self.cnn_up = nn.Conv2d(cnn_dim, trans_dim, kernel_size=1, bias=False)
+                self.cnn_bn = nn.BatchNorm2d(trans_dim)
+                
+            def forward(self, trans_feat, cnn_feat):
+                # 步骤1：CNN通道升维（256→768）
+                cnn_feat = self.cnn_up(cnn_feat)
+                cnn_feat = self.cnn_bn(cnn_feat)
+                # 步骤2：尺寸插值匹配（和Transformer特征尺寸一致）
+                cnn_feat = F.interpolate(
+                    cnn_feat, 
+                    size=trans_feat.shape[2:], 
+                    mode='bilinear', 
+                    align_corners=False  # 避免插值警告
+                )
+                # 步骤3：自适应加权（带正则化）
+                trans_feat = trans_feat * self.relu(self.trans_weight)
+                cnn_feat = cnn_feat * self.relu(self.cnn_weight)
+
+                # 步骤4：特征相加（通道已匹配：768=768）
+                fusion_feat = trans_feat + cnn_feat
+
+                # 步骤5：维度变换（修复语法+逻辑错误）
+                fusion_feat = fusion_feat.flatten(2)  # [B, 768, N]（N=16*8=128）
+                fusion_feat = fusion_feat.transpose(1, 2)  # [B, N, 768]
+                fusion_feat = self.l2_norm(fusion_feat)  # LayerNorm作用在特征维度（768）
+                fusion_feat = fusion_feat.transpose(1, 2).flatten(2)  # 还原为[B,768,N]
+                return fusion_feat
+                
+        self.fusion = AdaptiveFusion(trans_dim=768, cnn_dim=256)
+
         model_path = cfg.MODEL.PRETRAIN_PATH
         pretrain_choice = cfg.MODEL.PRETRAIN_CHOICE
         self.cos_layer = cfg.MODEL.COS_LAYER
@@ -342,28 +389,12 @@ class build_transformer_local(nn.Module):
         print('using divide_length size:{}'.format(self.divide_length))
         self.rearrange = rearrange
 
-        # （原有代码不变，新增以下轻量CNN分支）
-        self.in_planes = 768
-        # 轻量CNN分支：MobileNetV3_small，仅提取浅层局部特征（号码/鞋履）
-        self.cnn_branch = mobilenet_v3_small(pretrained=True)
-        # 截断到浅层，减少参数和显存（仅保留特征提取，去掉分类头）
-        self.cnn_branch = nn.Sequential(*list(self.cnn_branch.features)[:6])
-        # 降维层：MobileNetV3输出48通道→64通道，适配Transformer特征维度
-        # 修复后：输入通道改为40
-        self.cnn_reduce = nn.Conv2d(40, 64, kernel_size=1, bias=False)
-        self.cnn_bn = nn.BatchNorm2d(64)
-        # 简单融合层（4060版简化，避免复杂计算）
-        self.fusion = nn.Conv2d(self.in_planes + 64, self.in_planes, kernel_size=1, bias=False)
-
-        # （原有代码不变，如JPM、classifier、bottleneck等）
-
     def forward(self, x, label=None, cam_label= None, view_label=None):  # label is unused if self.cos_layer == 'no'
-        # ========== 新增CNN分支前向 ==========
-        # CNN分支提取局部纹理特征（号码/鞋履）
-        cnn_feat = self.cnn_branch(x)  # [B, 48, 16, 8]（对应输入256×128）
-        cnn_feat = self.cnn_reduce(cnn_feat)  # [B, 64, 16, 8]
+        # ========== 保留你原有forward逻辑，新增CNN分支前向 ==========
+        # 1. CNN分支前向
+        cnn_feat = self.cnn_branch(x)  # ResNet50输出：[B, 2048, 16, 8]
+        cnn_feat = self.cnn_reduce(cnn_feat)  # [B, 256, 16, 8]
         cnn_feat = self.cnn_bn(cnn_feat)
-        cnn_feat = F.relu(cnn_feat, inplace=True)
 
         # Transformer主干前向（原有代码）
         features = self.base(x, cam_label=cam_label, view_label=view_label)
@@ -372,15 +403,8 @@ class build_transformer_local(nn.Module):
         b1_feat = self.b1(features) # [64, 129, 768]
         global_feat = b1_feat[:, 0]
 
-        # ========== 特征融合 ==========
-        # 将Transformer全局特征reshape为2D，与CNN特征融合
-        trans_feat_2d = global_feat.unsqueeze(-1).unsqueeze(-1)  # [B, 768, 1, 1]
-        trans_feat_2d = F.interpolate(trans_feat_2d, size=cnn_feat.shape[2:], mode='bilinear')  # [B, 768, 16, 8]
-        # 拼接融合
-        concat_feat = torch.cat([trans_feat_2d, cnn_feat], dim=1)  # [B, 768+64=832, 16, 8]
-        fusion_feat = self.fusion(concat_feat)  # [B, 768, 16, 8]
-        # 池化为1D特征，适配原有损失计算
-        fusion_feat = F.adaptive_avg_pool2d(fusion_feat, 1).view(fusion_feat.shape[0], -1)  # [B, 768]
+        # 3. 特征融合
+        fusion_feat = self.fusion(trans_feat, cnn_feat)
 
         # ========== 原有JPM分支前向（不变） ==========
         # JPM branch
