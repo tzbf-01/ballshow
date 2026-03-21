@@ -4,23 +4,60 @@ from .backbones.resnet import ResNet, Bottleneck
 import copy
 from .backbones.vit_pytorch import vit_base_patch16_224_TransReID, vit_small_patch16_224_TransReID, deit_small_patch16_224_TransReID
 from loss.metric_learning import Arcface, Cosface, AMSoftmax, CircleLoss
+# ========== 先导入MobileNetV3 ==========
+from torchvision.models import mobilenet_v3_small
+import torch.nn.functional as F
 
 def shuffle_unit(features, shift, group, begin=1):
-
+    """
+    修复维度匹配的特征Shift+Patch Shuffle函数
+    Args:
+        features: 输入特征，shape [batchsize, num_patches, dim]（比如[32, 52, 768]）
+        shift: 移位步数
+        group: shuffle分组数（比如4）
+        begin: 移位起始位置
+    Returns:
+        x: 打乱后的特征，shape和输入一致
+    """
     batchsize = features.size(0)
-    dim = features.size(-1)
-    # Shift Operation
-    feature_random = torch.cat([features[:, begin-1+shift:], features[:, begin:begin-1+shift]], dim=1)
-    x = feature_random
-    # Patch Shuffle Operation
-    try:
-        x = x.view(batchsize, group, -1, dim)
-    except:
-        x = torch.cat([x, x[:, -2:-1, :]], dim=1)
-        x = x.view(batchsize, group, -1, dim)
+    dim = features.size(-1)  # 特征维度（比如768）
+    num_patches = features.size(1)  # 原始patch数（比如52）
 
-    x = torch.transpose(x, 1, 2).contiguous()
-    x = x.view(batchsize, -1, dim)
+    # ========== 1. Shift Operation（移位，保留原逻辑） ==========
+    # 处理移位步数超过patch数的情况（避免索引越界）
+    shift = shift % num_patches
+    feature_random = torch.cat([
+        features[:, begin-1+shift:],  # 后段特征
+        features[:, begin:begin-1+shift]  # 前段特征
+    ], dim=1)
+    x = feature_random
+    current_patches = x.size(1)  # 移位后的patch数
+
+    # ========== 2. 动态调整维度，保证view的元素总数匹配 ==========
+    # 目标：x.view(batchsize, group, -1, dim) 必须满足 batchsize*group*k*dim = batchsize*current_patches*dim
+    # 即 k = current_patches / group → 必须是整数，否则调整current_patches
+    target_patches = ((current_patches + group - 1) // group) * group  # 向上取整到group的整数倍
+    if target_patches > current_patches:
+        # 不足：补零（比拼接重复特征更合理，不破坏语义）
+        pad_num = target_patches - current_patches
+        pad = torch.zeros((batchsize, pad_num, dim), device=x.device, dtype=x.dtype)
+        x = torch.cat([x, pad], dim=1)
+    elif target_patches < current_patches:
+        # 过多：截断（只取前target_patches个patch）
+        x = x[:, :target_patches, :]
+
+    # ========== 3. Patch Shuffle Operation（维度匹配，可安全view） ==========
+    # 此时x.shape[1] = target_patches = group * k → view必然成功
+    x = x.view(batchsize, group, -1, dim)  # [B, group, k, dim]
+    x = torch.transpose(x, 1, 2).contiguous()  # 交换group和k维度
+    x = x.view(batchsize, -1, dim)  # 恢复为[B, group*k, dim]
+
+    # ========== 4. 还原为原始输入的patch数（可选，保证输出维度和输入一致） ==========
+    if x.size(1) > num_patches:
+        x = x[:, :num_patches, :]
+    elif x.size(1) < num_patches:
+        pad = torch.zeros((batchsize, num_patches - x.size(1), dim), device=x.device, dtype=x.dtype)
+        x = torch.cat([x, pad], dim=1)
 
     return x
 
@@ -305,14 +342,47 @@ class build_transformer_local(nn.Module):
         print('using divide_length size:{}'.format(self.divide_length))
         self.rearrange = rearrange
 
-    def forward(self, x, label=None, cam_label= None, view_label=None):  # label is unused if self.cos_layer == 'no'
+        # （原有代码不变，新增以下轻量CNN分支）
+        self.in_planes = 768
+        # 轻量CNN分支：MobileNetV3_small，仅提取浅层局部特征（号码/鞋履）
+        self.cnn_branch = mobilenet_v3_small(pretrained=True)
+        # 截断到浅层，减少参数和显存（仅保留特征提取，去掉分类头）
+        self.cnn_branch = nn.Sequential(*list(self.cnn_branch.features)[:6])
+        # 降维层：MobileNetV3输出48通道→64通道，适配Transformer特征维度
+        # 修复后：输入通道改为40
+        self.cnn_reduce = nn.Conv2d(40, 64, kernel_size=1, bias=False)
+        self.cnn_bn = nn.BatchNorm2d(64)
+        # 简单融合层（4060版简化，避免复杂计算）
+        self.fusion = nn.Conv2d(self.in_planes + 64, self.in_planes, kernel_size=1, bias=False)
 
+        # （原有代码不变，如JPM、classifier、bottleneck等）
+
+    def forward(self, x, label=None, cam_label= None, view_label=None):  # label is unused if self.cos_layer == 'no'
+        # ========== 新增CNN分支前向 ==========
+        # CNN分支提取局部纹理特征（号码/鞋履）
+        cnn_feat = self.cnn_branch(x)  # [B, 48, 16, 8]（对应输入256×128）
+        cnn_feat = self.cnn_reduce(cnn_feat)  # [B, 64, 16, 8]
+        cnn_feat = self.cnn_bn(cnn_feat)
+        cnn_feat = F.relu(cnn_feat, inplace=True)
+
+        # Transformer主干前向（原有代码）
         features = self.base(x, cam_label=cam_label, view_label=view_label)
 
         # global branch
         b1_feat = self.b1(features) # [64, 129, 768]
         global_feat = b1_feat[:, 0]
 
+        # ========== 特征融合 ==========
+        # 将Transformer全局特征reshape为2D，与CNN特征融合
+        trans_feat_2d = global_feat.unsqueeze(-1).unsqueeze(-1)  # [B, 768, 1, 1]
+        trans_feat_2d = F.interpolate(trans_feat_2d, size=cnn_feat.shape[2:], mode='bilinear')  # [B, 768, 16, 8]
+        # 拼接融合
+        concat_feat = torch.cat([trans_feat_2d, cnn_feat], dim=1)  # [B, 768+64=832, 16, 8]
+        fusion_feat = self.fusion(concat_feat)  # [B, 768, 16, 8]
+        # 池化为1D特征，适配原有损失计算
+        fusion_feat = F.adaptive_avg_pool2d(fusion_feat, 1).view(fusion_feat.shape[0], -1)  # [B, 768]
+
+        # ========== 原有JPM分支前向（不变） ==========
         # JPM branch
         feature_length = features.size(1) - 1
         patch_length = feature_length // self.divide_length
@@ -342,13 +412,15 @@ class build_transformer_local(nn.Module):
         b4_local_feat = self.b2(torch.cat((token, b4_local_feat), dim=1))
         local_feat_4 = b4_local_feat[:, 0]
 
-        feat = self.bottleneck(global_feat)
+        # ========== 修改特征输出：用融合后的特征替换原有global_feat ==========
+        feat = self.bottleneck(fusion_feat)  # 融合特征做BN
 
         local_feat_1_bn = self.bottleneck_1(local_feat_1)
         local_feat_2_bn = self.bottleneck_2(local_feat_2)
         local_feat_3_bn = self.bottleneck_3(local_feat_3)
         local_feat_4_bn = self.bottleneck_4(local_feat_4)
 
+        # 训练阶段输出（原有逻辑不变，仅特征源改为融合特征）
         if self.training:
             if self.ID_LOSS_TYPE in ('arcface', 'cosface', 'amsoftmax', 'circle'):
                 cls_score = self.classifier(feat, label)
@@ -358,17 +430,14 @@ class build_transformer_local(nn.Module):
                 cls_score_2 = self.classifier_2(local_feat_2_bn)
                 cls_score_3 = self.classifier_3(local_feat_3_bn)
                 cls_score_4 = self.classifier_4(local_feat_4_bn)
-            return [cls_score, cls_score_1, cls_score_2, cls_score_3,
-                        cls_score_4
-                        ], [global_feat, local_feat_1, local_feat_2, local_feat_3,
-                            local_feat_4]  # global feature for triplet loss
+            return [cls_score, cls_score_1, cls_score_2, cls_score_3, cls_score_4], \
+                   [fusion_feat, local_feat_1, local_feat_2, local_feat_3, local_feat_4]
         else:
+            # 测试阶段拼接融合特征和JPM局部特征
             if self.neck_feat == 'after':
-                return torch.cat(
-                    [feat, local_feat_1_bn / 4, local_feat_2_bn / 4, local_feat_3_bn / 4, local_feat_4_bn / 4], dim=1)
+                return torch.cat([feat, local_feat_1_bn/4, local_feat_2_bn/4, local_feat_3_bn/4, local_feat_4_bn/4], dim=1)
             else:
-                return torch.cat(
-                    [global_feat, local_feat_1 / 4, local_feat_2 / 4, local_feat_3 / 4, local_feat_4 / 4], dim=1)
+                return torch.cat([fusion_feat, local_feat_1/4, local_feat_2/4, local_feat_3/4, local_feat_4/4], dim=1)
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)

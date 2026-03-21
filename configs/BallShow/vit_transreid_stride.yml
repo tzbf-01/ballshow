@@ -5,27 +5,33 @@ MODEL:
   IF_LABELSMOOTH: 'off'
   IF_WITH_CENTER: 'no'
   NAME: 'transformer'
+  DIST_TRAIN: False
   NO_MARGIN: True
-  DEVICE_ID: ('1')
+  DEVICE_ID: ('0')
   TRANSFORMER_TYPE: 'vit_base_patch16_224_TransReID'
   STRIDE_SIZE: [12, 12]
   SIE_CAMERA: True
   SIE_COE: 3.0
   JPM: True
   RE_ARRANGE: True
+  # （原有参数不变，新增/修改以下）
+  DROP_PATH: 0.05  # 降低drop_path率，减少训练波动
+  SHUFFLE_GROUP: 4  # 降低shuffle组数，减少计算
+  SHIFT_NUM: 1
+  DEVIDE_LENGTH: 4
 
 INPUT:
   SIZE_TRAIN: [256, 128]
   SIZE_TEST: [256, 128]
   PROB: 0.5 # random horizontal flip
-  RE_PROB: 0.5 # random erasing
+  RE_PROB: 0.4 # random erasing
   PADDING: 10
   PIXEL_MEAN: [0.5, 0.5, 0.5]
   PIXEL_STD: [0.5, 0.5, 0.5]
 
 DATASETS:
-  NAMES: ('ballshow')
-  ROOT_DIR: ('./data')
+  NAMES: ballshow
+  ROOT_DIR: ./data
 
 DATALOADER:
   SAMPLER: 'softmax_triplet'
@@ -34,9 +40,9 @@ DATALOADER:
 
 SOLVER:
   OPTIMIZER_NAME: 'SGD'
-  MAX_EPOCHS: 120
-  BASE_LR: 0.008
-  IMS_PER_BATCH: 64
+  MAX_EPOCHS: 20
+  BASE_LR: 0.002
+  IMS_PER_BATCH: 32
   WARMUP_METHOD: 'linear'
   LARGE_FC_LR: False
   CHECKPOINT_PERIOD: 120

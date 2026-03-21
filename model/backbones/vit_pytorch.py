@@ -163,23 +163,49 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+# ========== 新增Token-SE模块 ==========
+class TokenSE(nn.Module):
+    """Token维度的通道注意力，强化球员号码/鞋履等关键特征"""
+    def __init__(self, dim=768, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)  # Token维度池化
+        self.fc = nn.Sequential(
+            nn.Linear(dim, dim // reduction, bias=False),  # 降维减少计算（适配4060）
+            nn.ReLU(inplace=True),
+            nn.Linear(dim // reduction, dim, bias=False),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        # x: [B, num_token, 768]（Transformer的Token特征）
+        b, n, c = x.shape
+        y = self.avg_pool(x.transpose(1,2)).view(b, c)  # [B, 768]
+        y = self.fc(y).view(b, 1, c)  # [B, 1, 768]
+        return x * y  # 通道加权
 
+
+# ========== 修改Block类，插入Token-SE ==========
 class Block(nn.Module):
-
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, insert_se=False):  # 新增insert_se参数
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
-        # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        # 新增Token-SE（仅指定层插入）
+        self.insert_se = insert_se
+        if self.insert_se:
+            self.token_se = TokenSE(dim=dim, reduction=16)  # reduction=16减少计算量
 
     def forward(self, x):
         x = x + self.drop_path(self.attn(self.norm1(x)))
+        # 插入Token-SE
+        if self.insert_se:
+            x = self.token_se(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -287,7 +313,7 @@ class PatchEmbed_overlap(nn.Module):
         x = x.flatten(2).transpose(1, 2) # [64, 8, 768]
         return x
 
-
+# ========== 修改TransReID的blocks初始化，仅第8层插入Token-SE ==========
 class TransReID(nn.Module):
     """ Transformer-based Object Re-Identification
     """
@@ -295,6 +321,7 @@ class TransReID(nn.Module):
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0., camera=0, view=0,
                  drop_path_rate=0., hybrid_backbone=None, norm_layer=nn.LayerNorm, local_feature=False, sie_xishu =1.0):
         super().__init__()
+        # （原有代码不变，仅修改blocks初始化部分）
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.local_feature = local_feature
@@ -336,12 +363,14 @@ class TransReID(nn.Module):
 
         self.pos_drop = nn.Dropout(p=drop_rate)
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
+                insert_se=(i == 8)  # 仅第8层插入Token-SE（中层，兼顾纹理和语义）
+            )
             for i in range(depth)])
+        # （剩余原有代码不变）
 
         self.norm = norm_layer(embed_dim)
 

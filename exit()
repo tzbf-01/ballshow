@@ -1,0 +1,29 @@
+[33mcommit 6cd508c9128bea792eef1d20d2630233ff83ba86[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mdevelop[m[33m, [m[1;31morigin/master[m[33m, [m[1;31morigin/develop[m[33m, [m[1;32mmaster[m[33m)[m
+Author: tzbf-01 <19011238129@163.com>
+Date:   Sat Mar 14 20:47:21 2026 +0800
+
+    修改忽略文件
+
+[33mcommit e14f8ff738cd496510177105803854b4f918b11e[m
+Author: tzbf-01 <19011238129@163.com>
+Date:   Sat Mar 14 17:27:02 2026 +0800
+
+    Delete data/BallShow directory
+
+[33mcommit 314285b9a8baafae8d0a50a73ef3e81a4af2c1b6[m
+Author: chengjiangyue <ac3168998984@163.com>
+Date:   Sat Mar 14 17:20:04 2026 +0800
+
+    Delete jx_vit_base_p16_224-80ecf9dd.pth
+
+[33mcommit a30092fa0205ad10cf65873cf202fbb8e55cefb1[m
+Author: tzbf-01 <19011238129@163.com>
+Date:   Sat Mar 14 11:26:12 2026 +0800
+
+    init: 初始化ballshow项目（使用LFS管理大文件）
+
+[33mcommit 205635f593fc913203a9e6bb2866934a4795a95f[m
+Author: kedao <chenkedao@shootz.tech>
+Date:   Wed Jan 21 10:10:47 2026 +0800
+
+    init
