@@ -395,9 +395,24 @@ class build_transformer_local(nn.Module):
         cnn_feat = self.cnn_branch(x)  # ResNet50输出：[B, 2048, 16, 8]
         cnn_feat = self.cnn_reduce(cnn_feat)  # [B, 256, 16, 8]
         cnn_feat = self.cnn_bn(cnn_feat)
+        # 记录CNN的空间尺寸（固定16×8，作为插值目标）
+        cnn_H, cnn_W = cnn_feat.shape[2], cnn_feat.shape[3]  # 16, 8
 
-        # Transformer主干前向（原有代码）
-        features = self.base(x, cam_label=cam_label, view_label=view_label)
+        # ========== 2. Transformer主干前向 + trans_feat定义（核心修复） ==========
+        features = self.base(x, cam_label=cam_label, view_label=view_label)  # [B, N, D]
+        B, N, D = features.shape  # 动态获取：B=批次，N=token数，D=特征维度（768/384）
+        
+        # 步骤1：提取patch特征（去掉cls_token）
+        trans_feat_patch = features[:, 1:]  # [B, patch_num, D] → patch_num = N-1
+        # 步骤2：重塑为4D特征（先按最大可能的尺寸reshape）
+        trans_feat_4d = trans_feat_patch.transpose(1, 2).reshape(B, D, 1, -1)  # [B, D, 1, patch_num]
+        # 步骤3：插值到CNN的16×8尺寸（关键！强制匹配空间尺寸）
+        trans_feat = F.interpolate(
+            trans_feat_4d, 
+            size=(cnn_H, cnn_W),  # 16×8，和CNN分支完全一致
+            mode='bilinear', 
+            align_corners=False
+        )  # 最终：[B, D, 16, 8] → 无论Transformer输出多少patch，都插值到16×8
 
         # global branch
         b1_feat = self.b1(features) # [64, 129, 768]
@@ -405,6 +420,10 @@ class build_transformer_local(nn.Module):
 
         # 3. 特征融合
         fusion_feat = self.fusion(trans_feat, cnn_feat)
+
+        # ========== 新增：融合特征池化（解决后续bottleneck维度错误） ==========
+        fusion_feat_pooled = torch.mean(fusion_feat, dim=2)  # [B,768,128] → [B,768]
+        feat = self.bottleneck(fusion_feat_pooled)  # 替换原有feat = self.bottleneck(fusion_feat)
 
         # ========== 原有JPM分支前向（不变） ==========
         # JPM branch
@@ -437,14 +456,13 @@ class build_transformer_local(nn.Module):
         local_feat_4 = b4_local_feat[:, 0]
 
         # ========== 修改特征输出：用融合后的特征替换原有global_feat ==========
-        feat = self.bottleneck(fusion_feat)  # 融合特征做BN
-
+        # ========== 修改特征输出：用池化后的融合特征 ==========
         local_feat_1_bn = self.bottleneck_1(local_feat_1)
         local_feat_2_bn = self.bottleneck_2(local_feat_2)
         local_feat_3_bn = self.bottleneck_3(local_feat_3)
         local_feat_4_bn = self.bottleneck_4(local_feat_4)
 
-        # 训练阶段输出（原有逻辑不变，仅特征源改为融合特征）
+        # ========== 训练阶段返回（关键修复：确保feat[0]是2维） ==========
         if self.training:
             if self.ID_LOSS_TYPE in ('arcface', 'cosface', 'amsoftmax', 'circle'):
                 cls_score = self.classifier(feat, label)
@@ -454,15 +472,31 @@ class build_transformer_local(nn.Module):
                 cls_score_2 = self.classifier_2(local_feat_2_bn)
                 cls_score_3 = self.classifier_3(local_feat_3_bn)
                 cls_score_4 = self.classifier_4(local_feat_4_bn)
+            # 重点：第一个返回的特征是fusion_feat_pooled（2维），而非fusion_feat（3维）
             return [cls_score, cls_score_1, cls_score_2, cls_score_3, cls_score_4], \
-                   [fusion_feat, local_feat_1, local_feat_2, local_feat_3, local_feat_4]
+                [fusion_feat_pooled, local_feat_1, local_feat_2, local_feat_3, local_feat_4]
         else:
             # 测试阶段拼接融合特征和JPM局部特征
+            # 测试阶段：所有特征统一为2维后拼接
             if self.neck_feat == 'after':
-                return torch.cat([feat, local_feat_1_bn/4, local_feat_2_bn/4, local_feat_3_bn/4, local_feat_4_bn/4], dim=1)
+                # feat是2维（[B,768]），局部特征也是2维
+                return torch.cat([
+                    feat,  # [B,768]
+                    local_feat_1_bn/4,  # [B,768]
+                    local_feat_2_bn/4,  # [B,768]
+                    local_feat_3_bn/4,  # [B,768]
+                    local_feat_4_bn/4   # [B,768]
+                ], dim=1)  # 最终：[B,768×5]
             else:
-                return torch.cat([fusion_feat, local_feat_1/4, local_feat_2/4, local_feat_3/4, local_feat_4/4], dim=1)
-
+                # fusion_feat_pooled是2维（[B,768]），局部特征也是2维
+                return torch.cat([
+                    fusion_feat_pooled,  # 替换3维的fusion_feat，用池化后的2维特征
+                    local_feat_1/4,      # [B,768]
+                    local_feat_2/4,      # [B,768]
+                    local_feat_3/4,      # [B,768]
+                    local_feat_4/4       # [B,768]
+                ], dim=1)  # 最终：[B,768×5]
+            
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)
         for i in param_dict:
