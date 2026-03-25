@@ -383,21 +383,137 @@ class build_transformer_local(nn.Module):
         print('Loading pretrained model for finetuning from {}'.format(model_path))
 
 
-__factory_T_type = {
+_factory_T_type = {
     'vit_base_patch16_224_TransReID': vit_base_patch16_224_TransReID,
     'deit_base_patch16_224_TransReID': vit_base_patch16_224_TransReID,
     'vit_small_patch16_224_TransReID': vit_small_patch16_224_TransReID,
     'deit_small_patch16_224_TransReID': deit_small_patch16_224_TransReID
 }
 
+
+class HybridModel(nn.Module):
+    def __init__(self, num_classes, camera_num, view_num, cfg):
+        super(HybridModel, self).__init__()
+        self.cfg = cfg
+        self.num_classes = num_classes
+        self.neck_feat = cfg.TEST.NECK_FEAT
+
+        # 1. Transformer 分支
+        transformer_cfg = {
+            'img_size': cfg.INPUT.SIZE_TRAIN,
+            'sie_xishu': cfg.MODEL.SIE_COE,
+            'camera': camera_num if cfg.MODEL.SIE_CAMERA else 0,
+            'view': view_num if cfg.MODEL.SIE_VIEW else 0,
+            'stride_size': cfg.MODEL.STRIDE_SIZE,
+            'drop_path_rate': cfg.MODEL.DROP_PATH,
+            'drop_rate': cfg.MODEL.DROP_OUT,
+            'attn_drop_rate': cfg.MODEL.ATT_DROP_RATE,
+            'return_intermediate': True  # 要求返回中间层特征
+        }
+        self.transformer = _factory_T_type[cfg.MODEL.TRANSFORMER_TYPE](**transformer_cfg)
+        # 加载预训练权重
+        if cfg.MODEL.PRETRAIN_CHOICE == 'imagenet':
+            self.transformer.load_param(cfg.MODEL.PRETRAIN_PATH)
+
+        # 2. CNN 分支
+        self.cnn = ResNet(last_stride=cfg.MODEL.LAST_STRIDE, block=Bottleneck, layers=[3,4,6,3])
+        # 单独为 CNN 分支加载预训练权重（使用 resnet50-0676ba61.pth）
+        if cfg.MODEL.PRETRAIN_CHOICE == 'imagenet':
+            # 可以硬编码路径，或者从配置中读取
+            resnet_pretrain_path = './resnet50-0676ba61.pth'  # 根据实际位置修改
+            self.cnn.load_param(resnet_pretrain_path)
+            print(f'Loading pretrained ResNet model from {resnet_pretrain_path}')
+
+        # 3. 用于映射 CNN 全局特征到 Transformer 维度的线性层
+        self.proj_cnn_shallow = nn.Linear(512, 768)   # stage2 输出通道 512 -> 768
+        self.proj_cnn_mid = nn.Linear(1024, 768)      # stage3 输出通道 1024 -> 768
+        self.proj_cnn_deep = nn.Linear(2048, 768)     # stage4 输出通道 2048 -> 768
+
+        # 4. 融合权重（可学习）
+        self.alpha1 = nn.Parameter(torch.ones(1))
+        self.beta1 = nn.Parameter(torch.ones(1))
+        self.alpha2 = nn.Parameter(torch.ones(1))
+        self.beta2 = nn.Parameter(torch.ones(1))
+        self.alpha3 = nn.Parameter(torch.ones(1))
+        self.beta3 = nn.Parameter(torch.ones(1))
+
+        # 5. 最终融合后的分类头（ID loss）和 BNNeck
+        self.bottleneck = nn.BatchNorm1d(768)   # 融合后的特征维度为 768
+        self.bottleneck.bias.requires_grad_(False)
+        self.bottleneck.apply(weights_init_kaiming)
+
+        self.classifier = nn.Linear(768, num_classes, bias=False)
+        self.classifier.apply(weights_init_classifier)
+
+    def forward(self, x, label=None, cam_label=None, view_label=None):
+        # 1. 获取 Transformer 分支的中间特征（列表：[layer3, layer5, last]）
+        trans_features = self.transformer.forward_features(x, cam_label, view_label)
+        # trans_features 是列表，每个元素形状 [B, N, 768]（N=211）
+
+        # 2. 获取 CNN 分支的中间特征（列表：[stage2, stage3, stage4]）
+        cnn_features = self.cnn(x)   # 列表 [f2, f3, f4]，形状分别为 [B,512,32,16], [B,1024,16,8], [B,2048,8,4]
+
+        # 3. 浅层融合（layer3 与 stage2）
+        cls_token_shallow = trans_features[0][:, 0, :]           # [B, 768]
+        cnn_global_shallow = cnn_features[0].mean([2,3])         # [B, 512]
+        cnn_proj_shallow = self.proj_cnn_shallow(cnn_global_shallow)  # [B, 768]
+        fused_cls_shallow = self.alpha1 * cls_token_shallow + self.beta1 * cnn_proj_shallow
+
+        # 重建中层输入：用融合后的 cls token 替换原中间特征的 cls token
+        mid_tokens = trans_features[1]  # [B, N, 768]
+        mid_cls_new = fused_cls_shallow.unsqueeze(1)  # [B, 1, 768]
+        mid_patches = mid_tokens[:, 1:, :]  # [B, N-1, 768]
+        mid_features = torch.cat([mid_cls_new, mid_patches], dim=1)  # [B, N, 768]
+
+        # 4. 中层融合（layer5 与 stage3）
+        cls_token_mid = mid_features[:, 0, :]           # [B, 768]  已经是融合后的 cls
+        cnn_global_mid = cnn_features[1].mean([2,3])          # [B, 1024]
+        cnn_proj_mid = self.proj_cnn_mid(cnn_global_mid)      # [B, 768]
+        fused_cls_mid = self.alpha2 * cls_token_mid + self.beta2 * cnn_proj_mid
+
+        # 重建深层输入：用融合后的 cls token 替换原最后一层特征的 cls token
+        last_tokens = trans_features[2]  # [B, N, 768]
+        last_cls_new = fused_cls_mid.unsqueeze(1)  # [B, 1, 768]
+        last_patches = last_tokens[:, 1:, :]  # [B, N-1, 768]
+        last_features = torch.cat([last_cls_new, last_patches], dim=1)  # [B, N, 768]
+
+        # 5. 深层融合（最终输出）
+        cls_token_last = last_features[:, 0, :]          # [B, 768]  已经是融合后的 cls
+        cnn_global_deep = cnn_features[2].mean([2,3])          # [B, 2048]
+        cnn_proj_deep = self.proj_cnn_deep(cnn_global_deep)    # [B, 768]
+        fused_cls_deep = self.alpha3 * cls_token_last + self.beta3 * cnn_proj_deep
+
+        # 6. 通过 BNNeck
+        feat = self.bottleneck(fused_cls_deep)
+
+        if self.training:
+            cls_score = self.classifier(feat)
+            return cls_score, fused_cls_deep   # 返回分类分数和融合特征（用于 triplet loss）
+        else:
+            if self.neck_feat == 'after':
+                return feat
+            else:
+                return fused_cls_deep
+
+    def load_param(self, trained_path):
+        # 加载训练好的权重（用于恢复训练）
+        param_dict = torch.load(trained_path)
+        for i in param_dict:
+            self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
+        print('Loading pretrained model from {}'.format(trained_path))
+
+
 def make_model(cfg, num_class, camera_num, view_num):
     if cfg.MODEL.NAME == 'transformer':
         if cfg.MODEL.JPM:
-            model = build_transformer_local(num_class, camera_num, view_num, cfg, __factory_T_type, rearrange=cfg.MODEL.RE_ARRANGE)
+            model = build_transformer_local(num_class, camera_num, view_num, cfg, _factory_T_type, rearrange=cfg.MODEL.RE_ARRANGE)
             print('===========building transformer with JPM module ===========')
         else:
-            model = build_transformer(num_class, camera_num, view_num, cfg, __factory_T_type)
+            model = build_transformer(num_class, camera_num, view_num, cfg, _factory_T_type)
             print('===========building transformer===========')
+    elif cfg.MODEL.NAME == 'hybrid':
+        model = HybridModel(num_class, camera_num, view_num, cfg)
+        print('===========building hybrid CNN-Transformer model===========')
     else:
         model = Backbone(num_class, cfg)
         print('===========building ResNet===========')

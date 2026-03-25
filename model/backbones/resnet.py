@@ -83,8 +83,9 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
     def __init__(self, last_stride=2, block=Bottleneck,layers=[3, 4, 6, 3]):
-        self.inplanes = 64
         super().__init__()
+        self.inplanes = 64
+        self.relu = nn.ReLU(inplace=True)
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
                                bias=False)
         self.bn1 = nn.BatchNorm2d(64)
@@ -115,14 +116,18 @@ class ResNet(nn.Module):
     def forward(self, x, cam_label=None):
         x = self.conv1(x)
         x = self.bn1(x)
-        # x = self.relu(x)    # add missed relu
+        x = self.relu(x)          # 原代码中缺少 relu，需要添加
         x = self.maxpool(x)
+
         x = self.layer1(x)
         x = self.layer2(x)
+        f2 = x                     # stage2 输出，用于浅层融合
         x = self.layer3(x)
+        f3 = x                     # stage3 输出，用于中层融合
         x = self.layer4(x)
+        f4 = x                     # stage4 输出，用于深层融合
 
-        return x
+        return [f2, f3, f4]       # 返回列表，顺序为 [stage2, stage3, stage4]
 
     def load_param(self, model_path):
         param_dict = torch.load(model_path)
