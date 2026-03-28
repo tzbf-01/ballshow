@@ -3,7 +3,7 @@ MODEL:
   SHIFT_NUM: 5                   # 已继承默认，可不写，但显式更清晰
   DROP_PATH: 0.1                 # 保持默认
   PRETRAIN_CHOICE: 'imagenet'
-  PRETRAIN_PATH: '/root/TransReID-master/jx_vit_base_p16_224-80ecf9dd.pth'  # 预训练权重路径
+  PRETRAIN_PATH: 'jx_vit_base_p16_224-80ecf9dd.pth'  # 预训练权重路径
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'
   IF_WITH_CENTER: 'no'
@@ -28,7 +28,7 @@ INPUT:
 
 DATASETS:
   NAMES: ballshow
-  ROOT_DIR: /root/TransReID-master/data
+  ROOT_DIR: data
 
 DATALOADER:
   SAMPLER: 'softmax_triplet'
