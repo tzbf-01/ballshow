@@ -431,11 +431,11 @@ class HybridModel(nn.Module):
 
         # 4. 融合权重（可学习）
         self.alpha1 = nn.Parameter(torch.ones(1))
-        self.beta1 = nn.Parameter(torch.ones(1))
+        self.beta1 = nn.Parameter(torch.zeros(1))
         self.alpha2 = nn.Parameter(torch.ones(1))
-        self.beta2 = nn.Parameter(torch.ones(1))
+        self.beta2 = nn.Parameter(torch.zeros(1))
         self.alpha3 = nn.Parameter(torch.ones(1))
-        self.beta3 = nn.Parameter(torch.ones(1))
+        self.beta3 = nn.Parameter(torch.zeros(1))
 
         # 5. 最终融合后的分类头（ID loss）和 BNNeck
         self.bottleneck = nn.BatchNorm1d(768)   # 融合后的特征维度为 768

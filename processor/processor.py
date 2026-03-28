@@ -18,6 +18,18 @@ def do_train(cfg,
              scheduler,
              loss_fn,
              num_query, local_rank):
+
+    if cfg.TEST.WEIGHT:
+        checkpoint = torch.load(cfg.TEST.WEIGHT, map_location='cpu')
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # 如果保存了 center 优化器，也加载
+        if center_criterion is not None and 'optimizer_center_state_dict' in checkpoint:
+            optimizer_center.load_state_dict(checkpoint['optimizer_center_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+    else:
+        start_epoch = 0
+
     log_period = cfg.SOLVER.LOG_PERIOD
     checkpoint_period = cfg.SOLVER.CHECKPOINT_PERIOD
     eval_period = cfg.SOLVER.EVAL_PERIOD
@@ -40,7 +52,7 @@ def do_train(cfg,
     evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     scaler = amp.GradScaler()
     # train
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         start_time = time.time()
         loss_meter.reset()
         acc_meter.reset()
@@ -91,13 +103,22 @@ def do_train(cfg,
                     .format(epoch, time_per_batch, train_loader.batch_size / time_per_batch))
 
         if epoch % checkpoint_period == 0:
+            # 构建要保存的字典
+            save_dict = {
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch': epoch,
+            }
+            # 如果使用了 center loss，还需要保存 center_criterion 的优化器状态
+            if center_criterion is not None and optimizer_center is not None:
+                save_dict['optimizer_center_state_dict'] = optimizer_center.state_dict()
+            
+            # 保存文件
             if cfg.MODEL.DIST_TRAIN:
                 if dist.get_rank() == 0:
-                    torch.save(model.state_dict(),
-                               os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_{}.pth'.format(epoch)))
+                    torch.save(save_dict, os.path.join(cfg.OUTPUT_DIR, f'checkpoint_ep{epoch}.pth'))
             else:
-                torch.save(model.state_dict(),
-                           os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_{}.pth'.format(epoch)))
+                torch.save(save_dict, os.path.join(cfg.OUTPUT_DIR, f'checkpoint_ep{epoch}.pth'))
 
         if epoch % eval_period == 0:
             if cfg.MODEL.DIST_TRAIN:

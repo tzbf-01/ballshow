@@ -1,13 +1,13 @@
 MODEL:
-  SHUFFLE_GROUP: 4               # 改为 4，与论文一致
+  SHUFFLE_GROUP: 2          
   SHIFT_NUM: 5                   # 已继承默认，可不写，但显式更清晰
   DROP_PATH: 0.1                 # 保持默认
   PRETRAIN_CHOICE: 'imagenet'
-  PRETRAIN_PATH: './jx_vit_base_p16_224-80ecf9dd.pth'  # 预训练权重路径
+  PRETRAIN_PATH: '/root/TransReID-master/jx_vit_base_p16_224-80ecf9dd.pth'  # 预训练权重路径
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'
   IF_WITH_CENTER: 'no'
-  NAME: 'hybrid'   # 使用混合模型
+  NAME: 'hybrid'   # 使用混合模型'hybrid'
   NO_MARGIN: True
   DEVICE_ID: ('0')
   TRANSFORMER_TYPE: 'vit_base_patch16_224_TransReID'
@@ -27,8 +27,8 @@ INPUT:
   PIXEL_STD: [0.5, 0.5, 0.5]
 
 DATASETS:
-  NAMES: ('ballshow')
-  ROOT_DIR: ('./data')
+  NAMES: ballshow
+  ROOT_DIR: /root/TransReID-master/data
 
 DATALOADER:
   SAMPLER: 'softmax_triplet'
@@ -37,12 +37,12 @@ DATALOADER:
 
 SOLVER:
   OPTIMIZER_NAME: 'SGD'
-  MAX_EPOCHS: 120
-  BASE_LR: 0.004
-  IMS_PER_BATCH: 32
+  MAX_EPOCHS: 200
+  BASE_LR: 0.008
+  IMS_PER_BATCH: 64
   WARMUP_METHOD: 'linear'
   LARGE_FC_LR: False
-  CHECKPOINT_PERIOD: 10
+  CHECKPOINT_PERIOD: 120
   LOG_PERIOD: 50
   EVAL_PERIOD: 10
   WEIGHT_DECAY:  1e-4
