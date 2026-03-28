@@ -183,6 +183,33 @@ class Block(nn.Module):
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
+class TokenSE(nn.Module):
+    """
+    Token 维度的压缩-激励模块（Token-wise Squeeze-and-Excitation）
+    对 Transformer 的 token 序列进行通道注意力加权，并添加残差连接
+    """
+    def __init__(self, dim, reduction=16):
+        super().__init__()
+        # 压缩阶段：将 token 维度平均，得到全局通道描述子
+        # 激励阶段：两个全连接层生成通道权重
+        self.fc1 = nn.Linear(dim, dim // reduction)   # 降维，减少计算量
+        self.fc2 = nn.Linear(dim // reduction, dim)   # 恢复维度
+        self.sigmoid = nn.Sigmoid()                  # 将权重限制在 (0,1)
+
+    def forward(self, x):
+        """
+        参数:
+            x: (B, N, D)  token 序列
+        返回:
+            (B, N, D)  增强后的 token 序列（残差连接）
+        """
+        # 1. 压缩：对 token 维度求平均，得到每个通道的全局信息
+        z = x.mean(dim=1, keepdim=True)          # (B, 1, D)
+        # 2. 激励：学习通道权重
+        s = self.fc2(self.fc1(z))                # (B, 1, D)
+        s = self.sigmoid(s)
+        # 3. 残差连接：原始特征 + 加权特征
+        return x + x * s
 
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
@@ -344,6 +371,9 @@ class TransReID(nn.Module):
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
             for i in range(depth)])
 
+        # 在第 8 层（索引 7）之后插入 Token-SE 模块
+        self.token_se = TokenSE(embed_dim, reduction=16)   # reduction 可根据需要调整（如 32）
+
         self.norm = norm_layer(embed_dim)
 
         # Classifier head
@@ -380,7 +410,7 @@ class TransReID(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
-        # 添加位置编码和 SIE
+        # 添加位置编码和侧信息嵌入（SIE）
         if self.cam_num > 0 and self.view_num > 0:
             x = x + self.pos_embed + self.sie_xishu * self.sie_embed[camera_id * self.view_num + view_id]
         elif self.cam_num > 0:
@@ -392,25 +422,33 @@ class TransReID(nn.Module):
 
         x = self.pos_drop(x)
 
+        # ========== 双分支模式（用于混合模型） ==========
         if self.return_intermediate:
-            # 双分支模式：需要中间层特征（layer[3], layer[5], 最后一层）
             intermediate = []
             for i, blk in enumerate(self.blocks):
                 x = blk(x)
-                if i in [3, 5, 11]:  # 索引从0开始
+                # 在第 8 层（索引 7）之后应用 Token-SE
+                if i == 7:
+                    x = self.token_se(x)
+                # 收集第 4 层、第 6 层和最后一层的特征（索引 3,5,11）
+                if i in [3, 5, 11]:
                     intermediate.append(x)
             return intermediate
+
+        # ========== 常规模式（baseline 或 JPM 分支） ==========
         else:
-            # 原有逻辑
+            # JPM 模式：只经过前 11 层，返回所有 token（未归一化）
             if self.local_feature:
-                # JPM 模式：只经过前11层，返回所有 token（未 norm）
+                # 注意：当前混合模型不使用 JPM，所以 JPM 分支暂不插入 Token-SE
                 for blk in self.blocks[:-1]:
                     x = blk(x)
                 return x
+            # 常规模式：经过全部 12 层，归一化后返回 [CLS] token
             else:
-                # 常规模式：经过全部12层，norm后返回 cls token
-                for blk in self.blocks:
+                for i, blk in enumerate(self.blocks):
                     x = blk(x)
+                    if i == 7:
+                        x = self.token_se(x)
                 x = self.norm(x)
                 return x[:, 0]
 
