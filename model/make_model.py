@@ -547,6 +547,20 @@ class HybridModel(nn.Module):
         # 加载预训练权重
         if cfg.MODEL.PRETRAIN_CHOICE == 'imagenet':
             self.transformer.load_param(cfg.MODEL.PRETRAIN_PATH)
+        # 加载 ballshow 上训练好的 transformer 权重（选择性加载）
+        if cfg.MODEL.TRANSFORMER_FINETUNE_PATH:
+            finetune_path = cfg.MODEL.TRANSFORMER_FINETUNE_PATH
+            finetune_dict = torch.load(finetune_path, map_location='cpu')
+            # 如果保存的是完整 checkpoint，提取模型权重
+            if 'model_state_dict' in finetune_dict:
+                finetune_dict = finetune_dict['model_state_dict']
+            # 只加载与当前 transformer 分支匹配的键（忽略 token_se 等新模块）
+            model_dict = self.transformer.state_dict()
+            pretrained_dict = {k: v for k, v in finetune_dict.items() 
+                            if k in model_dict and model_dict[k].shape == v.shape}
+            model_dict.update(pretrained_dict)
+            self.transformer.load_state_dict(model_dict)
+            print(f'Loaded ballshow-trained transformer weights from {finetune_path}')
 
         # 2. CNN 分支
         self.cnn = ResNet(last_stride=cfg.MODEL.LAST_STRIDE, block=Bottleneck, layers=[3,4,6,3])
@@ -575,6 +589,45 @@ class HybridModel(nn.Module):
             in_channels_trans=768, in_channels_cnn=2048,
             out_channels_trans=768, out_channels_cnn=2048
         )
+
+        # JPM 模块（参考 build_transformer_local）
+        block = self.transformer.blocks[-1]  # 使用最后一个 Transformer 块
+        layer_norm = self.transformer.norm
+        self.b1 = nn.Sequential(
+            copy.deepcopy(block),
+            copy.deepcopy(layer_norm)
+        )
+        self.b2 = nn.Sequential(
+            copy.deepcopy(block),
+            copy.deepcopy(layer_norm)
+        )
+        self.shuffle_groups = cfg.MODEL.SHUFFLE_GROUP
+        self.shift_num = cfg.MODEL.SHIFT_NUM
+        self.divide_length = cfg.MODEL.DEVIDE_LENGTH
+        self.rearrange = cfg.MODEL.RE_ARRANGE
+
+        # 局部特征的分类器和 BNNeck
+        self.bottleneck_1 = nn.BatchNorm1d(768)
+        self.bottleneck_1.bias.requires_grad_(False)
+        self.bottleneck_1.apply(weights_init_kaiming)
+        self.bottleneck_2 = nn.BatchNorm1d(768)
+        self.bottleneck_2.bias.requires_grad_(False)
+        self.bottleneck_2.apply(weights_init_kaiming)
+        self.bottleneck_3 = nn.BatchNorm1d(768)
+        self.bottleneck_3.bias.requires_grad_(False)
+        self.bottleneck_3.apply(weights_init_kaiming)
+        self.bottleneck_4 = nn.BatchNorm1d(768)
+        self.bottleneck_4.bias.requires_grad_(False)
+        self.bottleneck_4.apply(weights_init_kaiming)
+
+        self.classifier_1 = nn.Linear(768, num_classes, bias=False)
+        self.classifier_1.apply(weights_init_classifier)
+        self.classifier_2 = nn.Linear(768, num_classes, bias=False)
+        self.classifier_2.apply(weights_init_classifier)
+        self.classifier_3 = nn.Linear(768, num_classes, bias=False)
+        self.classifier_3.apply(weights_init_classifier)
+        self.classifier_4 = nn.Linear(768, num_classes, bias=False)
+        self.classifier_4.apply(weights_init_classifier)
 
         # 5. 最终融合后的分类头（ID loss）和 BNNeck
         self.bottleneck = nn.BatchNorm1d(768)   # 融合后的特征维度为 768
@@ -626,21 +679,66 @@ class HybridModel(nn.Module):
         cls_token_deep = trans_seq_mid[:, 0:1, :]
         trans_seq_deep = torch.cat([cls_token_deep, trans_seq_deep], dim=1)
 
-        # 最终特征：取深层融合后的特征图的全局平均池化
-        fused_cls_deep = trans_enhanced_deep.mean([2, 3])  # (B, D)
+        # ========== JPM 分支 ==========
+        features = trans_seq_deep  # (B, N, D) 包含 cls token 和所有 patch tokens
 
-        # 通过 BNNeck
-        feat = self.bottleneck(fused_cls_deep)
+        # 全局分支：通过 b1 后取 cls token
+        b1_feat = self.b1(features)
+        global_feat = b1_feat[:, 0]  # 与 baseline 中的全局特征类似
+
+        # JPM 分支
+        feature_length = features.size(1) - 1
+        patch_length = feature_length // self.divide_length
+        token = features[:, 0:1]
+
+        if self.rearrange:
+            x = shuffle_unit(features, self.shift_num, self.shuffle_groups)
+        else:
+            x = features[:, 1:]
+
+        # 生成4个局部特征
+        b1_local_feat = x[:, :patch_length]
+        b1_local_feat = self.b2(torch.cat((token, b1_local_feat), dim=1))
+        local_feat_1 = b1_local_feat[:, 0]
+
+        b2_local_feat = x[:, patch_length:patch_length*2]
+        b2_local_feat = self.b2(torch.cat((token, b2_local_feat), dim=1))
+        local_feat_2 = b2_local_feat[:, 0]
+
+        b3_local_feat = x[:, patch_length*2:patch_length*3]
+        b3_local_feat = self.b2(torch.cat((token, b3_local_feat), dim=1))
+        local_feat_3 = b3_local_feat[:, 0]
+
+        b4_local_feat = x[:, patch_length*3:patch_length*4]
+        b4_local_feat = self.b2(torch.cat((token, b4_local_feat), dim=1))
+        local_feat_4 = b4_local_feat[:, 0]
+
+        # BNNeck 处理
+        feat_global = self.bottleneck(global_feat)
+        feat_local1 = self.bottleneck_1(local_feat_1)
+        feat_local2 = self.bottleneck_2(local_feat_2)
+        feat_local3 = self.bottleneck_3(local_feat_3)
+        feat_local4 = self.bottleneck_4(local_feat_4)
 
         if self.training:
-            cls_score = self.classifier(feat)
-            return cls_score, fused_cls_deep
+            # 分类分数
+            cls_score = self.classifier(feat_global)
+            cls_score_1 = self.classifier_1(feat_local1)
+            cls_score_2 = self.classifier_2(feat_local2)
+            cls_score_3 = self.classifier_3(feat_local3)
+            cls_score_4 = self.classifier_4(feat_local4)
+            
+            # 返回列表（与 baseline 中 build_transformer_local 一致）
+            return [cls_score, cls_score_1, cls_score_2, cls_score_3, cls_score_4], \
+                [feat_global, feat_local1, feat_local2, feat_local3, feat_local4]
         else:
+            # 测试时：拼接所有特征（除以4是为了平衡尺度）
             if self.neck_feat == 'after':
-                return feat
+                return torch.cat([feat_global, feat_local1/4, feat_local2/4, feat_local3/4, feat_local4/4], dim=1)
             else:
-                return fused_cls_deep
+                return torch.cat([global_feat, local_feat_1/4, local_feat_2/4, local_feat_3/4, local_feat_4/4], dim=1)
 
+        
     def load_param(self, trained_path):
         # 加载训练好的权重（用于恢复训练）
         param_dict = torch.load(trained_path)

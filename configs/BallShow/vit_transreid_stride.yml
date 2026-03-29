@@ -1,9 +1,10 @@
 MODEL:
   SHUFFLE_GROUP: 2          
   SHIFT_NUM: 5                   # 已继承默认，可不写，但显式更清晰
-  DROP_PATH: 0.1                 # 保持默认
+  DROP_PATH: 0.2                 # 保持默认
   PRETRAIN_CHOICE: 'imagenet'
   PRETRAIN_PATH: 'jx_vit_base_p16_224-80ecf9dd.pth'  # 预训练权重路径
+  TRANSFORMER_FINETUNE_PATH: 'BallShow-TransReID_Checkpoint.pth'  # baseline 权重路径
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'
   IF_WITH_CENTER: 'no'
@@ -14,8 +15,11 @@ MODEL:
   STRIDE_SIZE: [12, 12]
   SIE_CAMERA: True
   SIE_COE: 3.0
-  JPM: False       # 暂时关闭 JPM
+  JPM: True       # 暂时关闭 JPM
   RE_ARRANGE: True
+  DROP_OUT: 0.1         # 原为 0.0，可调至 0.1
+  ATT_DROP_RATE: 0.1    # 原为 0.0，可调至 0.1
+
 
 INPUT:
   SIZE_TRAIN: [256, 128]
@@ -37,7 +41,7 @@ DATALOADER:
 
 SOLVER:
   OPTIMIZER_NAME: 'SGD'
-  MAX_EPOCHS: 200
+  MAX_EPOCHS: 120
   BASE_LR: 0.008
   IMS_PER_BATCH: 64
   WARMUP_METHOD: 'linear'
@@ -45,7 +49,7 @@ SOLVER:
   CHECKPOINT_PERIOD: 120
   LOG_PERIOD: 50
   EVAL_PERIOD: 10
-  WEIGHT_DECAY:  1e-4
+  WEIGHT_DECAY:  5e-4
   WEIGHT_DECAY_BIAS: 1e-4
   BIAS_LR_FACTOR: 2
 
