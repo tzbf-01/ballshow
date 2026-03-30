@@ -413,24 +413,38 @@ class TransReID(nn.Module):
             param_dict = param_dict['model']
         if 'state_dict' in param_dict:
             param_dict = param_dict['state_dict']
+        
+        # 去除键名中的 'base.' 前缀（如果存在）
+        new_state_dict = {}
+        for k, v in param_dict.items():
+            if k.startswith('base.'):
+                new_k = k[5:]  # 去掉 'base.'
+            else:
+                new_k = k
+            new_state_dict[new_k] = v
+        param_dict = new_state_dict
+
+        model_dict = self.state_dict()
         for k, v in param_dict.items():
             if 'head' in k or 'dist' in k:
+                continue
+            if k not in model_dict:
                 continue
             if 'patch_embed.proj.weight' in k and len(v.shape) < 4:
                 # For old models that I trained prior to conv based patchification
                 O, I, H, W = self.patch_embed.proj.weight.shape
                 v = v.reshape(O, -1, H, W)
-            elif k == 'pos_embed' and v.shape != self.pos_embed.shape:
+            elif k == 'pos_embed' and v.shape != model_dict[k].shape:
                 # To resize pos embedding when using model at different size from pretrained weights
                 if 'distilled' in model_path:
                     print('distill need to choose right cls token in the pth')
                     v = torch.cat([v[:, 0:1], v[:, 2:]], dim=1)
                 v = resize_pos_embed(v, self.pos_embed, self.patch_embed.num_y, self.patch_embed.num_x)
             try:
-                self.state_dict()[k].copy_(v)
-            except:
-                print('===========================ERROR=========================')
-                print('shape do not match in k :{}: param_dict{} vs self.state_dict(){}'.format(k, v.shape, self.state_dict()[k].shape))
+                model_dict[k].copy_(v)
+            except Exception as e:
+                print(f'Error copying {k}: {e}')
+        print('Loading pretrained model from {}'.format(model_path))
 
 
 def resize_pos_embed(posemb, posemb_new, hight, width):
