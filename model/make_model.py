@@ -741,9 +741,26 @@ class HybridModel(nn.Module):
         
     def load_param(self, trained_path):
         # 加载训练好的权重（用于恢复训练）
-        param_dict = torch.load(trained_path)
-        for i in param_dict:
-            self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
+        param_dict = torch.load(trained_path, map_location='cpu')
+        # 处理常见的 checkpoint 格式
+        if 'model_state_dict' in param_dict:
+            param_dict = param_dict['model_state_dict']
+        elif 'state_dict' in param_dict:
+            param_dict = param_dict['state_dict']
+        # 兼容分布式训练保存的键（去除 'module.' 前缀）
+        new_state_dict = {}
+        for k, v in param_dict.items():
+            if k.startswith('module.'):
+                new_k = k[7:]  # 去掉 'module.'
+            else:
+                new_k = k
+            new_state_dict[new_k] = v
+        # 加载权重（只加载匹配的键，避免 shape 不匹配）
+        model_dict = self.state_dict()
+        pretrained_dict = {k: v for k, v in new_state_dict.items() 
+                        if k in model_dict and model_dict[k].shape == v.shape}
+        model_dict.update(pretrained_dict)
+        self.load_state_dict(model_dict)
         print('Loading pretrained model from {}'.format(trained_path))
 
 
