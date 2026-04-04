@@ -67,8 +67,8 @@ def make_loss(cfg, num_classes, model=None):
         xent = None
 
     # 辅助损失权重（论文中设为1.0，可调）
-    lambda_ortho = 1.0
-    lambda_div = 1.0
+    lambda_ortho = 0.0
+    lambda_div = 0.0
 
     if sampler == 'softmax':
         def loss_func(score, feat, target):

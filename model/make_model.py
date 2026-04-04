@@ -79,7 +79,7 @@ class OcclusionAwareGrouping(nn.Module):
     输入: Transformer 输出的 token 序列 (B, N, D), 其中 N = num_patches+1 (包含 cls token)
     输出: 分组后的特征列表 [global_feat, group_feat_1, ..., group_feat_G]
     """
-    def __init__(self, num_groups=17, num_occluded=10, temp=0.1):
+    def __init__(self, num_groups=17, num_occluded=10, temp=1.0):   #temp改为1.0
         super().__init__()
         self.num_groups = num_groups          # G, 通常设为 17 (对应人体关键点)
         self.num_occluded = num_occluded      # 选择多少个 patch 作为遮挡特征
@@ -87,7 +87,7 @@ class OcclusionAwareGrouping(nn.Module):
 
         # 可学习的组权重矩阵 (D x G)
         self.group_weights = nn.Parameter(torch.Tensor(768, num_groups))
-        nn.init.xavier_uniform_(self.group_weights)
+        nn.init.normal_(self.group_weights, std=0.01)   # 使用较小的标准差初始化
 
         # 每个组的可学习缩放因子 gamma (用于自适应组大小)
         self.gamma = nn.Parameter(torch.ones(num_groups))
@@ -102,9 +102,11 @@ class OcclusionAwareGrouping(nn.Module):
 
         # 1. 计算每个 patch token 与 cls token 的余弦相似度
         cls_norm = F.normalize(cls_token, dim=-1)           # (B,1,D)
-        patch_norm = F.normalize(patch_tokens, dim=-1)      # (B,N-1,D)
+        patch_norm = F.normalize(patch_tokens, dim=-1) # (B,N-1,D)
+        if torch.isnan(patch_norm).any():
+            print("NaN in patch_norm")     
         sim = torch.bmm(patch_norm, cls_norm.transpose(1,2)).squeeze(-1)  # (B, N-1)
-
+       
         # 2. 选择相似度最低的 k 个 patch 作为遮挡特征
         _, occluded_indices = torch.topk(sim, k=self.num_occluded, dim=1, largest=False)
         # 创建掩膜: 1 表示非遮挡特征, 0 表示遮挡特征
@@ -113,8 +115,10 @@ class OcclusionAwareGrouping(nn.Module):
 
         # 3. 非遮挡特征
         non_occluded_tokens = patch_tokens * mask.unsqueeze(-1)  # 遮挡位置置零
+        # 添加：对非遮挡特征进行 L2 归一化，防止数值爆炸
+        non_occluded_tokens = F.normalize(non_occluded_tokens, dim=-1)
         # 去除零向量（但保留形状，后面通过加权求和忽略零贡献）
-
+        
         # 4. 计算每个非遮挡特征与组权重的相关性得分
         # 组权重: (D, G) -> (B, D, G)
         group_weights = self.group_weights.unsqueeze(0).expand(B, -1, -1)  # (B, D, G)
@@ -122,13 +126,13 @@ class OcclusionAwareGrouping(nn.Module):
         non_occluded_tokens_T = non_occluded_tokens.transpose(1,2)         # (B, D, N-1)
         # 相关性得分: (B, G, N-1)
         scores = torch.bmm(group_weights.transpose(1,2), non_occluded_tokens_T) / self.temp
+        scores = torch.clamp(scores, min=-10, max=10)   # 限制范围，避免 softmax 输入过大
         # 对每个 patch 在组间做 softmax
         attn = F.softmax(scores, dim=1)          # (B, G, N-1)
 
         # 5. 自适应组大小: 根据 gamma 和 attn 计算每组应该聚合的特征数（这里简化为加权求和）
         # 组特征 = 所有非遮挡特征的加权和（权重为 attn）
         group_features = torch.bmm(attn, non_occluded_tokens)   # (B, G, D)
-
         # 6. 可选：添加正交损失和多样性损失（在外部计算，此处不实现）
         # 返回全局特征和组特征列表
         global_feat = cls_token.squeeze(1)   # (B, D)
@@ -167,7 +171,7 @@ class build_transformer_local(nn.Module):
             print('Loading pretrained ImageNet model......from {}'.format(model_path))
 
         # 不再使用原来的 b1, b2, 改用 OAG
-        self.oag = OcclusionAwareGrouping(num_groups=17, num_occluded=10, temp=0.1)
+        self.oag = OcclusionAwareGrouping(num_groups=17, num_occluded=10, temp=1.0) #temp改为1.0
 
         self.num_classes = num_classes
         self.ID_LOSS_TYPE = cfg.MODEL.ID_LOSS_TYPE

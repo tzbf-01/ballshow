@@ -429,6 +429,7 @@ class TransReID(nn.Module):
             if 'head' in k or 'dist' in k:
                 continue
             if k not in model_dict:
+                print(f'Skipping {k} (not in model)')
                 continue
             if 'patch_embed.proj.weight' in k and len(v.shape) < 4:
                 # For old models that I trained prior to conv based patchification
