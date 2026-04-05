@@ -37,36 +37,52 @@ def make_loss(cfg, num_classes):    # modified by gu
         def loss_func(score, feat, target, target_cam):
             if cfg.MODEL.METRIC_LOSS_TYPE == 'triplet':
                 if cfg.MODEL.IF_LABELSMOOTH == 'on':
+                    # ---------- ID loss ----------
                     if isinstance(score, list):
-                        ID_LOSS = [xent(scor, target) for scor in score[1:]]
-                        ID_LOSS = sum(ID_LOSS) / len(ID_LOSS)
-                        ID_LOSS = 0.5 * ID_LOSS + 0.5 * xent(score[0], target)
+                        if len(score) > 1:
+                            ID_LOSS = [xent(scor, target) for scor in score[1:]]
+                            ID_LOSS = sum(ID_LOSS) / len(ID_LOSS)
+                            ID_LOSS = 0.5 * ID_LOSS + 0.5 * xent(score[0], target)
+                        else:
+                            ID_LOSS = xent(score[0], target)
                     else:
                         ID_LOSS = xent(score, target)
 
+                    # ---------- Triplet loss ----------
                     if isinstance(feat, list):
+                        if len(feat) > 1:
                             TRI_LOSS = [triplet(feats, target)[0] for feats in feat[1:]]
                             TRI_LOSS = sum(TRI_LOSS) / len(TRI_LOSS)
                             TRI_LOSS = 0.5 * TRI_LOSS + 0.5 * triplet(feat[0], target)[0]
+                        else:
+                            TRI_LOSS = triplet(feat[0], target)[0]
                     else:
-                            TRI_LOSS = triplet(feat, target)[0]
+                        TRI_LOSS = triplet(feat, target)[0]
 
                     return cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS + \
                                cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS
                 else:
+                    # ---------- ID loss ----------
                     if isinstance(score, list):
-                        ID_LOSS = [F.cross_entropy(scor, target) for scor in score[1:]]
-                        ID_LOSS = sum(ID_LOSS) / len(ID_LOSS)
-                        ID_LOSS = 0.5 * ID_LOSS + 0.5 * F.cross_entropy(score[0], target)
+                        if len(score) > 1:
+                            ID_LOSS = [F.cross_entropy(scor, target) for scor in score[1:]]
+                            ID_LOSS = sum(ID_LOSS) / len(ID_LOSS)
+                            ID_LOSS = 0.5 * ID_LOSS + 0.5 * F.cross_entropy(score[0], target)
+                        else:
+                            ID_LOSS = F.cross_entropy(score[0], target)
                     else:
                         ID_LOSS = F.cross_entropy(score, target)
 
+                    # ---------- Triplet loss ----------
                     if isinstance(feat, list):
+                        if len(feat) > 1:
                             TRI_LOSS = [triplet(feats, target)[0] for feats in feat[1:]]
                             TRI_LOSS = sum(TRI_LOSS) / len(TRI_LOSS)
                             TRI_LOSS = 0.5 * TRI_LOSS + 0.5 * triplet(feat[0], target)[0]
+                        else:
+                            TRI_LOSS = triplet(feat[0], target)[0]
                     else:
-                            TRI_LOSS = triplet(feat, target)[0]
+                        TRI_LOSS = triplet(feat, target)[0]
 
                     return cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS + \
                                cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS

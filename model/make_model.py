@@ -351,17 +351,19 @@ class build_transformer_local(nn.Module):
 
         if self.training:
             if self.ID_LOSS_TYPE in ('arcface', 'cosface', 'amsoftmax', 'circle'):
-                cls_score = self.classifier(feat, label)
+                # 只使用全局特征进行 ArcFace 分类
+                cls_score = self.classifier(feat, label)  # 注意：feat 是 global_feat 经过 BN 后的结果
+                # 返回单元素列表以兼容训练循环（loss_func 中会判断 isinstance(score, list)）
+                return [cls_score], [global_feat]
             else:
+                # 原有的 softmax + JPM 多分支逻辑
                 cls_score = self.classifier(feat)
                 cls_score_1 = self.classifier_1(local_feat_1_bn)
                 cls_score_2 = self.classifier_2(local_feat_2_bn)
                 cls_score_3 = self.classifier_3(local_feat_3_bn)
                 cls_score_4 = self.classifier_4(local_feat_4_bn)
-            return [cls_score, cls_score_1, cls_score_2, cls_score_3,
-                        cls_score_4
-                        ], [global_feat, local_feat_1, local_feat_2, local_feat_3,
-                            local_feat_4]  # global feature for triplet loss
+                return [cls_score, cls_score_1, cls_score_2, cls_score_3, cls_score_4], \
+                    [global_feat, local_feat_1, local_feat_2, local_feat_3, local_feat_4]  # global feature for triplet loss
         else:
             if self.neck_feat == 'after':
                 return torch.cat(

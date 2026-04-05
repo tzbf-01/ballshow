@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "C:\Users\19011\Desktop\ballshow\train.py", line 41, in <module>
+    cfg.merge_from_other_cfg(cfg.load_cfg(cfg_str))   # Ô­´úÂë£ºcfg.merge_from_file(args.config_file)
+  File "C:\Users\19011\.conda\envs\ballshow\lib\site-packages\yacs\config.py", line 217, in merge_from_other_cfg
+    _merge_a_into_b(cfg_other, self, self, [])
+  File "C:\Users\19011\.conda\envs\ballshow\lib\site-packages\yacs\config.py", line 478, in _merge_a_into_b
+    _merge_a_into_b(v, b[k], root, key_list + [k])
+  File "C:\Users\19011\.conda\envs\ballshow\lib\site-packages\yacs\config.py", line 474, in _merge_a_into_b
+    v = _check_and_coerce_cfg_value_type(v, b[k], k, full_key)
+  File "C:\Users\19011\.conda\envs\ballshow\lib\site-packages\yacs\config.py", line 534, in _check_and_coerce_cfg_value_type
+    raise ValueError(
+ValueError: Type mismatch (<class 'int'> vs. <class 'float'>) with values (30 vs. 30.0) for config key: SOLVER.COSINE_SCALE
