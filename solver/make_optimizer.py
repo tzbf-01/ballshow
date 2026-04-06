@@ -12,7 +12,7 @@ def make_optimizer(cfg, model, center_criterion):
         # ========== 新增：主干（transformer）使用较低学习率 ==========
         # 根据参数名判断是否属于 Transformer 主干（混合模型中 self.transformer）
         if 'transformer' in key:
-            lr = lr * 0.125   # 0.008 * 0.125 = 0.001
+            lr = lr * 0.25   # 0.008 * 0.125 = 0.001
         # =======================================================
 
         if "bias" in key:

@@ -20,7 +20,7 @@ MODEL:
   DROP_OUT: 0.0         
   ATT_DROP_RATE: 0.0 
   ID_LOSS_WEIGHT: 1.0            # ID loss 权重（可保持）
-  TRIPLET_LOSS_WEIGHT: 2.0       # 增大 triplet loss 权重，加强度量学习   
+  TRIPLET_LOSS_WEIGHT: 1.0       # 增大 triplet loss 权重，加强度量学习   
 
 
 INPUT:
@@ -29,8 +29,8 @@ INPUT:
   PROB: 0.5 # random horizontal flip
   RE_PROB: 0.5 # random erasing
   PADDING: 10
-  PIXEL_MEAN: [0.485, 0.456, 0.406]
-  PIXEL_STD: [0.229, 0.224, 0.225]
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
 
 DATASETS:
   NAMES: ballshow
