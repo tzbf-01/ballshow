@@ -102,13 +102,17 @@ class OcclusionAwareGrouping(nn.Module):
 
         # 1. 计算每个 patch token 与 cls token 的余弦相似度
         cls_norm = F.normalize(cls_token, dim=-1)           # (B,1,D)
-        patch_norm = F.normalize(patch_tokens, dim=-1) # (B,N-1,D)
+        # 添加 eps 防止除零，并将 NaN 替换为 0
+        patch_norm = F.normalize(patch_tokens, dim=-1, eps=1e-8)
         if torch.isnan(patch_norm).any():
-            print("NaN in patch_norm")     
+            patch_norm = torch.nan_to_num(patch_norm, nan=0.0)
+            print("NaN in patch_norm, replaced with zero")     
         sim = torch.bmm(patch_norm, cls_norm.transpose(1,2)).squeeze(-1)  # (B, N-1)
        
         # 2. 选择相似度最低的 k 个 patch 作为遮挡特征
-        _, occluded_indices = torch.topk(sim, k=self.num_occluded, dim=1, largest=False)
+        # 确保 k 不超过 sim 的列数
+        k = min(self.num_occluded, sim.shape[1])
+        _, occluded_indices = torch.topk(sim, k=k, dim=1, largest=False)
         # 创建掩膜: 1 表示非遮挡特征, 0 表示遮挡特征
         mask = torch.ones_like(sim)
         mask.scatter_(1, occluded_indices, 0)   # (B, N-1)
@@ -116,7 +120,7 @@ class OcclusionAwareGrouping(nn.Module):
         # 3. 非遮挡特征
         non_occluded_tokens = patch_tokens * mask.unsqueeze(-1)  # 遮挡位置置零
         # 添加：对非遮挡特征进行 L2 归一化，防止数值爆炸
-        non_occluded_tokens = F.normalize(non_occluded_tokens, dim=-1)
+        non_occluded_tokens = F.normalize(non_occluded_tokens, dim=-1, eps=1e-8)
         # 去除零向量（但保留形状，后面通过加权求和忽略零贡献）
         
         # 4. 计算每个非遮挡特征与组权重的相关性得分
@@ -126,7 +130,8 @@ class OcclusionAwareGrouping(nn.Module):
         non_occluded_tokens_T = non_occluded_tokens.transpose(1,2)         # (B, D, N-1)
         # 相关性得分: (B, G, N-1)
         scores = torch.bmm(group_weights.transpose(1,2), non_occluded_tokens_T) / self.temp
-        scores = torch.clamp(scores, min=-10, max=10)   # 限制范围，避免 softmax 输入过大
+        scores = torch.clamp(scores, min=-10, max=10)
+        scores = torch.nan_to_num(scores, nan=0.0)   # 将 NaN 替换为 0   # 限制范围，避免 softmax 输入过大
         # 对每个 patch 在组间做 softmax
         attn = F.softmax(scores, dim=1)          # (B, G, N-1)
 
