@@ -17,6 +17,12 @@ MODEL:
 INPUT:
   SIZE_TRAIN: [256, 128]
   SIZE_TEST: [256, 128]
+  USE_DIFFUSION_FILTER: True   # 开启滤波
+  DIFFUSION_ITER: 3
+  DIFFUSION_W1: 0.5
+  DIFFUSION_W2: 0.5
+  DIFFUSION_GAMMA: 5.0
+  DIFFUSION_H: 8.0     
   PROB: 0.5 # random horizontal flip
   RE_PROB: 0.5 # random erasing
   PADDING: 10

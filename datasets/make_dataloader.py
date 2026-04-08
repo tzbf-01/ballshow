@@ -1,12 +1,28 @@
 import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
-
+import torch.distributed as dist
 from .bases import ImageDataset
 from timm.data.random_erasing import RandomErasing
 from .sampler import RandomIdentitySampler
 from .sampler_ddp import RandomIdentitySampler_DDP
 from .ballshow import BallShow
+from utils.diffusion_filter import anisotropic_diffusion_filter
+
+class DiffusionFilter(object):
+    def __init__(self, cfg):
+        self.enabled = cfg.INPUT.USE_DIFFUSION_FILTER
+        self.iter = cfg.INPUT.DIFFUSION_ITER
+        self.w1 = cfg.INPUT.DIFFUSION_W1
+        self.w2 = cfg.INPUT.DIFFUSION_W2
+        self.gamma = cfg.INPUT.DIFFUSION_GAMMA
+        self.h = cfg.INPUT.DIFFUSION_H
+        
+    def __call__(self, tensor):
+        if not self.enabled:
+            return tensor
+        # tensor 是 (C,H,W)，值域 [0,1]
+        return anisotropic_diffusion_filter(tensor, self.iter, self.w1, self.w2, self.gamma, self.h)
 
 __factory = {
     'ballshow': BallShow,
@@ -35,6 +51,7 @@ def make_dataloader(cfg):
             T.Pad(cfg.INPUT.PADDING),
             T.RandomCrop(cfg.INPUT.SIZE_TRAIN),
             T.ToTensor(),
+            DiffusionFilter(cfg),  # <--- 插入滤波（在 Normalize 之前）
             T.Normalize(mean=cfg.INPUT.PIXEL_MEAN, std=cfg.INPUT.PIXEL_STD),
             RandomErasing(probability=cfg.INPUT.RE_PROB, mode='pixel', max_count=1, device='cpu'),
             # RandomErasing(probability=cfg.INPUT.RE_PROB, mean=cfg.INPUT.PIXEL_MEAN)
@@ -43,6 +60,7 @@ def make_dataloader(cfg):
     val_transforms = T.Compose([
         T.Resize(cfg.INPUT.SIZE_TEST),
         T.ToTensor(),
+        DiffusionFilter(cfg),          # 添加滤波，保持与训练一致
         T.Normalize(mean=cfg.INPUT.PIXEL_MEAN, std=cfg.INPUT.PIXEL_STD)
     ])
 
