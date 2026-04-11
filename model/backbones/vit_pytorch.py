@@ -410,7 +410,7 @@ class TransReID(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
-        # 添加位置编码和侧信息嵌入（SIE）
+        # 添加位置编码和侧信息嵌入
         if self.cam_num > 0 and self.view_num > 0:
             x = x + self.pos_embed + self.sie_xishu * self.sie_embed[camera_id * self.view_num + view_id]
         elif self.cam_num > 0:
@@ -424,12 +424,11 @@ class TransReID(nn.Module):
 
         # ========== 双分支模式（用于混合模型） ==========
         if self.return_intermediate:
+            # 改动：在所有 blocks 之前应用一次 Token‑SE，使后续所有中间特征都经过通道增强
+            x = self.token_se(x)   # <--- 新增/移位：将 Token‑SE 应用提前到这里
             intermediate = []
             for i, blk in enumerate(self.blocks):
                 x = blk(x)
-                # 在第 8 层（索引 7）之后应用 Token-SE
-                if i == 7:
-                    x = self.token_se(x)
                 # 收集第 4 层、第 6 层和最后一层的特征（索引 3,5,11）
                 if i in [3, 5, 11]:
                     intermediate.append(x)
@@ -439,7 +438,6 @@ class TransReID(nn.Module):
         else:
             # JPM 模式：只经过前 11 层，返回所有 token（未归一化）
             if self.local_feature:
-                # 注意：当前混合模型不使用 JPM，所以 JPM 分支暂不插入 Token-SE
                 for blk in self.blocks[:-1]:
                     x = blk(x)
                 return x
@@ -448,7 +446,7 @@ class TransReID(nn.Module):
                 for i, blk in enumerate(self.blocks):
                     x = blk(x)
                     if i == 7:
-                        x = self.token_se(x)
+                        x = self.token_se(x)   # 常规模式下仍保留原位置
                 x = self.norm(x)
                 return x[:, 0]
 

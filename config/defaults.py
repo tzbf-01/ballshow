@@ -70,6 +70,7 @@ _C.MODEL.SIE_VIEW = False
 
 # 新增配置
 _C.MODEL.TRANSFORMER_FINETUNE_PATH = ''
+_C.MODEL.CNN_PRETRAIN_PATH = ''
 
 # -----------------------------------------------------------------------------
 # INPUT

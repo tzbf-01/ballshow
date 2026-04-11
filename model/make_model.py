@@ -392,128 +392,87 @@ _factory_T_type = {
 }
 
 class CrossDimensionalMultiScaleFusion(nn.Module):
-    """跨纬度多尺度特征融合模块
-    输入: 
-        trans_feat: Transformer 特征图 (B, D, H, W)  (D=768, H=21, W=10)
-        cnn_feat: CNN 特征图 (B, C, H_c, W_c)
-    输出:
-        fused_trans: 增强后的 Transformer 特征图 (B, D, H, W) (用于残差添加)
-        fused_cnn: 增强后的 CNN 特征图 (B, C, H_c, W_c) (用于残差添加)
-    """
     def __init__(self, in_channels_trans, in_channels_cnn, out_channels_trans, out_channels_cnn, reduction=16):
         super().__init__()
         self.in_channels_trans = in_channels_trans
         self.in_channels_cnn = in_channels_cnn
-        # 投影层，将两个分支的特征通道统一到相同维度（可选，文献中拼接后通道数为两者之和）
+        self.out_channels_trans = out_channels_trans
+        self.out_channels_cnn = out_channels_cnn
+        
+        # 投影层保持输入通道数不变（可选，若需要改变通道可在此调整）
         self.proj_trans = nn.Conv2d(in_channels_trans, in_channels_trans, 1)
         self.proj_cnn = nn.Conv2d(in_channels_cnn, in_channels_cnn, 1)
         
-        # 用于多尺度池化的卷积，保持通道数不变
-        self.conv_after_pool = nn.Conv2d(in_channels_trans + in_channels_cnn, 
-                                         in_channels_trans + in_channels_cnn, 3, padding=1)
+        # 融合后的总通道数
+        fusion_channels = in_channels_trans + in_channels_cnn
+        self.conv_after_pool = nn.Conv2d(fusion_channels, fusion_channels, 3, padding=1)
         
-        # 分割后的通道数（一半给Transformer，一半给CNN，根据文献中的切分）
-        self.split_trans = in_channels_trans
-        self.split_cnn = in_channels_cnn
-        
+        # 明确记录切分点，为 Transformer 分支的通道数
+        self.split_idx = in_channels_trans
+
     def forward(self, trans_feat, cnn_feat):
-        """
-        trans_feat: (B, D, H, W)
-        cnn_feat: (B, C, H_c, W_c)
-        """
-        # 1. 将 CNN 特征图插值到与 Transformer 相同的空间尺寸
-        _, _, H, W = trans_feat.shape
+        B, _, H, W = trans_feat.shape
         cnn_resized = F.interpolate(cnn_feat, size=(H, W), mode='bilinear', align_corners=False)
         
-        # 2. 投影（可选，保持通道数）
-        trans_proj = self.proj_trans(trans_feat)  # (B, D, H, W)
-        cnn_proj = self.proj_cnn(cnn_resized)     # (B, C, H, W)
+        trans_proj = self.proj_trans(trans_feat)
+        cnn_proj = self.proj_cnn(cnn_resized)
         
-        # 3. 在通道维度拼接，得到融合特征 X (B, D+C, H, W)
-        X = torch.cat([trans_proj, cnn_proj], dim=1)
-        B, C_total, H, W = X.shape
-        C_half = C_total // 2  # 这里假设 D == C，实际上不一定，但文献中是等通道数拼接
+        X = torch.cat([trans_proj, cnn_proj], dim=1)  # (B, D+C, H, W)
+        C_total = X.shape[1]
         
-        # 4. 三个分支的多尺度处理
-        # 分支1: 空间注意力（保留空间维度，多尺度池化）
-        # 将通道分成4组，每组分别进行不同尺度的池化
-        chunk_size = C_total // 4
-        X_chunks = torch.chunk(X, 4, dim=1)  # 列表，每个 (B, chunk_size, H, W)
-        multi_scale_features = []
-        for i, chunk in enumerate(X_chunks):
-            # 对每个chunk分别进行1x1, 2x2, 4x4, 8x8 的 max pooling
-            scales = [1, 2, 4, 8]
-            pooled_list = []
-            for s in scales:
-                if s == 1:
-                    pooled = chunk
-                else:
-                    pooled = F.adaptive_max_pool2d(chunk, (H//s, W//s))
-                    pooled = F.interpolate(pooled, size=(H, W), mode='bilinear', align_corners=False)
-                pooled_list.append(pooled)
-            # 平均四个尺度
-            avg_pooled = torch.stack(pooled_list, dim=0).mean(dim=0)  # (B, chunk_size, H, W)
-            multi_scale_features.append(avg_pooled)
-        branch1 = torch.cat(multi_scale_features, dim=1)  # (B, C_total, H, W)
+        # ===== 修改点 1：安全处理通道分组（使用 min 确保 chunk_size 不为 0）=====
+        chunk_size = max(1, C_total // 4)
+        X_chunks = list(torch.chunk(X, 4, dim=1))
+        # 如果因整除问题导致最后一个 chunk 尺寸不一致，手动调整
+        if len(X_chunks) != 4:
+            # 简单回退：直接对整个 X 做多尺度池化
+            branch1 = self._multi_scale_pool(X, H, W)
+        else:
+            multi_scale_features = []
+            for chunk in X_chunks:
+                pooled = self._multi_scale_pool(chunk, H, W)
+                multi_scale_features.append(pooled)
+            branch1 = torch.cat(multi_scale_features, dim=1)
         
-        # 分支2: 通道+高度交互（旋转90°后做同样操作）
-        # 沿高度方向逆时针旋转90°: (H, W) -> (W, H)
-        X_rot_h = X.transpose(2, 3)  # (B, C_total, W, H)  实际上逆时针旋转需要permute，这里简化用transpose
-        # 对旋转后的特征重复分支1的操作
+        # 分支2和分支3也使用相同安全分组方式
+        X_rot_h = X.transpose(2, 3)
         X_rot_h_chunks = torch.chunk(X_rot_h, 4, dim=1)
-        multi_scale_h = []
-        for i, chunk in enumerate(X_rot_h_chunks):
-            scales = [1, 2, 4, 8]
-            pooled_list = []
-            _, _, Hr, Wr = chunk.shape
-            for s in scales:
-                if s == 1:
-                    pooled = chunk
-                else:
-                    pooled = F.adaptive_max_pool2d(chunk, (Hr//s, Wr//s))
-                    pooled = F.interpolate(pooled, size=(Hr, Wr), mode='bilinear', align_corners=False)
-                pooled_list.append(pooled)
-            avg_pooled = torch.stack(pooled_list, dim=0).mean(dim=0)
-            multi_scale_h.append(avg_pooled)
-        branch2_temp = torch.cat(multi_scale_h, dim=1)  # (B, C_total, W, H)
-        # 旋转回来
-        branch2 = branch2_temp.transpose(2, 3)  # (B, C_total, H, W)
+        multi_scale_h = [self._multi_scale_pool(c, H, W) for c in X_rot_h_chunks]
+        branch2_temp = torch.cat(multi_scale_h, dim=1)
+        branch2 = branch2_temp.transpose(2, 3)
         
-        # 分支3: 通道+宽度交互（旋转90°后做同样操作）
-        X_rot_w = X.permute(0, 1, 3, 2)  # (B, C_total, W, H) 实际上与上面相同，但为了对称，再转一次
+        # 分支3：宽度交互（真正的逆时针旋转90度）
+        X_rot_w = X.permute(0, 1, 3, 2)  # 交换 H 和 W，但需要确保后续恢复正确
         X_rot_w_chunks = torch.chunk(X_rot_w, 4, dim=1)
-        multi_scale_w = []
-        for i, chunk in enumerate(X_rot_w_chunks):
-            scales = [1, 2, 4, 8]
-            pooled_list = []
-            _, _, Hr, Wr = chunk.shape
-            for s in scales:
-                if s == 1:
-                    pooled = chunk
-                else:
-                    pooled = F.adaptive_max_pool2d(chunk, (Hr//s, Wr//s))
-                    pooled = F.interpolate(pooled, size=(Hr, Wr), mode='bilinear', align_corners=False)
-                pooled_list.append(pooled)
-            avg_pooled = torch.stack(pooled_list, dim=0).mean(dim=0)
-            multi_scale_w.append(avg_pooled)
+        multi_scale_w = [self._multi_scale_pool(c, H, W) for c in X_rot_w_chunks]
         branch3_temp = torch.cat(multi_scale_w, dim=1)
-        branch3 = branch3_temp.permute(0, 1, 3, 2)  # (B, C_total, H, W)
+        branch3 = branch3_temp.permute(0, 1, 3, 2)
         
-        # 5. 三个分支的结果进行算术平均
+        # 平均融合
         fused = (branch1 + branch2 + branch3) / 3.0
-        
-        # 6. 通过一个卷积层进一步融合
         fused = self.conv_after_pool(fused)
         
-        # 7. 切分为两部分，分别对应 Transformer 和 CNN 分支的增强特征
-        trans_enhanced = fused[:, :self.split_trans, :, :]  # (B, D, H, W)
-        cnn_enhanced = fused[:, self.split_trans:, :, :]    # (B, C, H, W)
+        # ===== 修改点 2：精确按输入通道数切分 =====
+        trans_enhanced = fused[:, :self.split_idx, :, :]
+        cnn_enhanced = fused[:, self.split_idx:, :, :]
         
-        # 8. 将 CNN 增强特征插值回原尺寸，以便加回原特征图
         _, _, Hc, Wc = cnn_feat.shape
         cnn_enhanced_resized = F.interpolate(cnn_enhanced, size=(Hc, Wc), mode='bilinear', align_corners=False)
         
         return trans_enhanced, cnn_enhanced_resized
+
+    def _multi_scale_pool(self, x, H, W):
+        """对输入张量进行多尺度池化并平均"""
+        scales = [1, 2, 4, 8]
+        pooled_list = []
+        for s in scales:
+            if s == 1:
+                pooled = x
+            else:
+                pooled = F.adaptive_max_pool2d(x, (max(1, H//s), max(1, W//s)))
+                pooled = F.interpolate(pooled, size=(H, W), mode='bilinear', align_corners=False)
+            pooled_list.append(pooled)
+        return torch.stack(pooled_list, dim=0).mean(dim=0)
 
 class HybridModel(nn.Module):
     def __init__(self, num_classes, camera_num, view_num, cfg):
@@ -566,10 +525,9 @@ class HybridModel(nn.Module):
         self.cnn = ResNet(last_stride=cfg.MODEL.LAST_STRIDE, block=Bottleneck, layers=[3,4,6,3])
         # 单独为 CNN 分支加载预训练权重（使用 resnet50-0676ba61.pth）
         if cfg.MODEL.PRETRAIN_CHOICE == 'imagenet':
-            # 可以硬编码路径，或者从配置中读取
-            resnet_pretrain_path = './resnet50-0676ba61.pth'  # 根据实际位置修改
-            self.cnn.load_param(resnet_pretrain_path)
-            print(f'Loading pretrained ResNet model from {resnet_pretrain_path}')
+            cnn_pretrain_path = cfg.MODEL.CNN_PRETRAIN_PATH if cfg.MODEL.CNN_PRETRAIN_PATH else cfg.MODEL.PRETRAIN_PATH
+            self.cnn.load_param(cnn_pretrain_path)
+            print(f'Loading pretrained ResNet model from {cnn_pretrain_path}')
 
         # 3. 用于映射 CNN 全局特征到 Transformer 维度的线性层
         self.proj_cnn_shallow = nn.Linear(512, 768)   # stage2 输出通道 512 -> 768
@@ -643,31 +601,27 @@ class HybridModel(nn.Module):
         cnn_features = self.cnn(x)  # 列表 [f2, f3, f4]
 
         B, N, D = trans_features[0].shape
-        H_t, W_t = self.trans_hw  # 动态获取空间尺寸
+        H_t, W_t = self.trans_hw
+
+        # ---------- 改动点：保存原始最后一层特征用于 JPM ----------
+        raw_last_trans_seq = trans_features[2]   # (B, N, 768)，未经过融合
 
         # ---------- 浅层融合 (layer3 + stage2) ----------
-        # 将 Transformer token 序列转换为空间特征图（排除 cls token）
         trans_spatial = trans_features[0][:, 1:, :].transpose(1, 2).reshape(B, D, H_t, W_t)
         cnn_shallow = cnn_features[0]
         trans_enhanced, cnn_enhanced_shallow = self.fusion_shallow(trans_spatial, cnn_shallow)
 
-        # 将增强后的 Transformer 特征图转回 token 序列，并拼接 cls token（保留原始 cls token，未融合）
-        trans_seq_shallow = trans_enhanced.flatten(2).transpose(1, 2)  # (B, H*W, D)
-        cls_token_original = trans_features[0][:, 0:1, :]  # 原始 cls token，暂不改变
-        trans_seq_shallow = torch.cat([cls_token_original, trans_seq_shallow], dim=1)  # (B, N, D)
-
-        # 可选：将增强后的 CNN 特征加回原特征（残差），供中层融合使用（这里我们直接替换，简化）
-        # 更合理的方式是将其与下一层 CNN 特征进行融合，但为了保持简洁，我们暂不处理。
+        trans_seq_shallow = trans_enhanced.flatten(2).transpose(1, 2)
+        cls_token_original = trans_features[0][:, 0:1, :]
+        trans_seq_shallow = torch.cat([cls_token_original, trans_seq_shallow], dim=1)
 
         # ---------- 中层融合 (layer5 + stage3) ----------
-        # 使用浅层增强后的 Transformer 序列作为中层输入
         mid_spatial = trans_seq_shallow[:, 1:, :].transpose(1, 2).reshape(B, D, H_t, W_t)
-        cnn_mid = cnn_features[1]  # 原始中层 CNN 特征
+        cnn_mid = cnn_features[1]
         trans_enhanced_mid, cnn_enhanced_mid = self.fusion_mid(mid_spatial, cnn_mid)
 
-        # 构建中层增强后的 Transformer 序列
         trans_seq_mid = trans_enhanced_mid.flatten(2).transpose(1, 2)
-        cls_token_mid = trans_seq_shallow[:, 0:1, :]  # 来自浅层的 cls token（未融合）
+        cls_token_mid = trans_seq_shallow[:, 0:1, :]
         trans_seq_mid = torch.cat([cls_token_mid, trans_seq_mid], dim=1)
 
         # ---------- 深层融合 (last + stage4) ----------
@@ -677,18 +631,21 @@ class HybridModel(nn.Module):
 
         trans_seq_deep = trans_enhanced_deep.flatten(2).transpose(1, 2)
         cls_token_deep = trans_seq_mid[:, 0:1, :]
-        trans_seq_deep = torch.cat([cls_token_deep, trans_seq_deep], dim=1)
+        trans_seq_deep = torch.cat([cls_token_deep, trans_seq_deep], dim=1)   # 融合后的全局序列
 
-        # ========== JPM 分支 ==========
-        features = trans_seq_deep  # (B, N, D) 包含 cls token 和所有 patch tokens
+        # ========== JPM 分支（改动：使用原始序列而非融合后序列） ==========
+        # 使用 raw_last_trans_seq 作为 JPM 的输入特征
+        features = raw_last_trans_seq   # (B, N, D)，包含 cls token
 
-        # 全局分支：通过 b1 后取 cls token
+        # 全局分支：通过 b1 后取 cls token（这里 b1 输入是融合前的序列）
         b1_feat = self.b1(features)
-        global_feat = b1_feat[:, 0]  # 与 baseline 中的全局特征类似
+        global_feat_jpm = b1_feat[:, 0]   # 注意：这个全局特征与融合后的全局特征可能不同，可根据需要选择或结合
 
-        # JPM 分支
+        # JPM 局部分支
         feature_length = features.size(1) - 1
-        patch_length = feature_length // self.divide_length
+        # 改进：处理不能整除情况（应用改动3）
+        group_size = feature_length // self.divide_length
+        remainder = feature_length % self.divide_length
         token = features[:, 0:1]
 
         if self.rearrange:
@@ -696,47 +653,47 @@ class HybridModel(nn.Module):
         else:
             x = features[:, 1:]
 
-        # 生成4个局部特征
-        b1_local_feat = x[:, :patch_length]
-        b1_local_feat = self.b2(torch.cat((token, b1_local_feat), dim=1))
-        local_feat_1 = b1_local_feat[:, 0]
+        # 提取各局部特征
+        local_feats = []
+        start = 0
+        for i in range(self.divide_length):
+            length = group_size + (1 if i < remainder else 0)
+            end = start + length
+            local_part = x[:, start:end]
+            local_out = self.b2(torch.cat((token, local_part), dim=1))
+            local_feat = local_out[:, 0]   # cls token 输出
+            local_feats.append(local_feat)
+            start = end
 
-        b2_local_feat = x[:, patch_length:patch_length*2]
-        b2_local_feat = self.b2(torch.cat((token, b2_local_feat), dim=1))
-        local_feat_2 = b2_local_feat[:, 0]
+        local_feat_1, local_feat_2, local_feat_3, local_feat_4 = local_feats
 
-        b3_local_feat = x[:, patch_length*2:patch_length*3]
-        b3_local_feat = self.b2(torch.cat((token, b3_local_feat), dim=1))
-        local_feat_3 = b3_local_feat[:, 0]
-
-        b4_local_feat = x[:, patch_length*3:patch_length*4]
-        b4_local_feat = self.b2(torch.cat((token, b4_local_feat), dim=1))
-        local_feat_4 = b4_local_feat[:, 0]
-
-        # BNNeck 处理
-        feat_global = self.bottleneck(global_feat)
+        # BNNeck 处理（局部特征）
         feat_local1 = self.bottleneck_1(local_feat_1)
         feat_local2 = self.bottleneck_2(local_feat_2)
         feat_local3 = self.bottleneck_3(local_feat_3)
         feat_local4 = self.bottleneck_4(local_feat_4)
 
+        # ---------- 全局特征的选择 ----------
+        # 方案一：使用融合后的全局特征（推荐）
+        global_feat_fused = trans_seq_deep[:, 0]   # 融合序列的 cls token
+        feat_global = self.bottleneck(global_feat_fused)
+
+        # 方案二：如果希望结合 JPM 全局特征，可加权融合，此处采用方案一
+
         if self.training:
-            # 分类分数
             cls_score = self.classifier(feat_global)
             cls_score_1 = self.classifier_1(feat_local1)
             cls_score_2 = self.classifier_2(feat_local2)
             cls_score_3 = self.classifier_3(feat_local3)
             cls_score_4 = self.classifier_4(feat_local4)
             
-            # 返回列表（与 baseline 中 build_transformer_local 一致）
             return [cls_score, cls_score_1, cls_score_2, cls_score_3, cls_score_4], \
                 [feat_global, feat_local1, feat_local2, feat_local3, feat_local4]
         else:
-            # 测试时：拼接所有特征（除以4是为了平衡尺度）
             if self.neck_feat == 'after':
                 return torch.cat([feat_global, feat_local1/4, feat_local2/4, feat_local3/4, feat_local4/4], dim=1)
             else:
-                return torch.cat([global_feat, local_feat_1/4, local_feat_2/4, local_feat_3/4, local_feat_4/4], dim=1)
+                return torch.cat([global_feat_fused, local_feat_1/4, local_feat_2/4, local_feat_3/4, local_feat_4/4], dim=1)
 
         
     def load_param(self, trained_path):
