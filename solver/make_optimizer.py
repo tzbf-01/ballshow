@@ -9,11 +9,15 @@ def make_optimizer(cfg, model, center_criterion):
         lr = cfg.SOLVER.BASE_LR
         weight_decay = cfg.SOLVER.WEIGHT_DECAY
 
-        # ========== 新增：主干（transformer）使用较低学习率 ==========
-        # 根据参数名判断是否属于 Transformer 主干（混合模型中 self.transformer）
+        # ========== 分层学习率设置 ==========
+        # Transformer 主干使用较低学习率
         if 'transformer' in key:
-            lr = lr * 0.25   # 0.008 * 0.125 = 0.001
-        # =======================================================
+            lr = lr * 0.1
+        # CNN 分支（如 OSNet）保持基础学习率或稍高
+        elif 'cnn' in key:
+            lr = lr * 1.0   # 可根据需要调整为 1.2 等
+        # 其他新增模块（融合、JPM 等）使用基础学习率，无需额外设置
+        # ===================================
 
         if "bias" in key:
             lr = lr * cfg.SOLVER.BIAS_LR_FACTOR

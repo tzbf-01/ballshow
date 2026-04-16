@@ -5,6 +5,13 @@ import copy
 from .backbones.vit_pytorch import vit_base_patch16_224_TransReID, vit_small_patch16_224_TransReID, deit_small_patch16_224_TransReID
 from loss.metric_learning import Arcface, Cosface, AMSoftmax, CircleLoss
 import torch.nn.functional as F
+import torchreid
+import os
+
+import torchreid
+model = torchreid.models.osnet.osnet_x1_0(pretrained=False)
+for name, module in model.named_modules():
+    print(name)
 
 def shuffle_unit(features, shift, group, begin=1):
 
@@ -417,48 +424,40 @@ class CrossDimensionalMultiScaleFusion(nn.Module):
         trans_proj = self.proj_trans(trans_feat)
         cnn_proj = self.proj_cnn(cnn_resized)
         
-        X = torch.cat([trans_proj, cnn_proj], dim=1)  # (B, D+C, H, W)
+        X = torch.cat([trans_proj, cnn_proj], dim=1)
         C_total = X.shape[1]
         
-        # ===== 修改点 1：安全处理通道分组（使用 min 确保 chunk_size 不为 0）=====
+        # 分支1
         chunk_size = max(1, C_total // 4)
         X_chunks = list(torch.chunk(X, 4, dim=1))
-        # 如果因整除问题导致最后一个 chunk 尺寸不一致，手动调整
         if len(X_chunks) != 4:
-            # 简单回退：直接对整个 X 做多尺度池化
             branch1 = self._multi_scale_pool(X, H, W)
         else:
-            multi_scale_features = []
-            for chunk in X_chunks:
-                pooled = self._multi_scale_pool(chunk, H, W)
-                multi_scale_features.append(pooled)
+            multi_scale_features = [self._multi_scale_pool(c, H, W) for c in X_chunks]
             branch1 = torch.cat(multi_scale_features, dim=1)
         
-        # 分支2和分支3也使用相同安全分组方式
-        X_rot_h = X.transpose(2, 3)
+        # 分支2
+        X_rot_h = X.transpose(2, 3)   # ← 补充定义
         X_rot_h_chunks = torch.chunk(X_rot_h, 4, dim=1)
-        multi_scale_h = [self._multi_scale_pool(c, H, W) for c in X_rot_h_chunks]
+        multi_scale_h = [self._multi_scale_pool(c, W, H) for c in X_rot_h_chunks]
         branch2_temp = torch.cat(multi_scale_h, dim=1)
         branch2 = branch2_temp.transpose(2, 3)
-        
-        # 分支3：宽度交互（真正的逆时针旋转90度）
-        X_rot_w = X.permute(0, 1, 3, 2)  # 交换 H 和 W，但需要确保后续恢复正确
+
+        # 分支3
+        X_rot_w = X.permute(0, 1, 3, 2)
         X_rot_w_chunks = torch.chunk(X_rot_w, 4, dim=1)
-        multi_scale_w = [self._multi_scale_pool(c, H, W) for c in X_rot_w_chunks]
+        multi_scale_w = [self._multi_scale_pool(c, W, H) for c in X_rot_w_chunks]
         branch3_temp = torch.cat(multi_scale_w, dim=1)
         branch3 = branch3_temp.permute(0, 1, 3, 2)
         
-        # 平均融合
         fused = (branch1 + branch2 + branch3) / 3.0
         fused = self.conv_after_pool(fused)
         
-        # ===== 修改点 2：精确按输入通道数切分 =====
         trans_enhanced = fused[:, :self.split_idx, :, :]
         cnn_enhanced = fused[:, self.split_idx:, :, :]
         
         _, _, Hc, Wc = cnn_feat.shape
         cnn_enhanced_resized = F.interpolate(cnn_enhanced, size=(Hc, Wc), mode='bilinear', align_corners=False)
-        
         return trans_enhanced, cnn_enhanced_resized
 
     def _multi_scale_pool(self, x, H, W):
@@ -521,32 +520,35 @@ class HybridModel(nn.Module):
             self.transformer.load_state_dict(model_dict)
             print(f'Loaded ballshow-trained transformer weights from {finetune_path}')
 
-        # 2. CNN 分支
-        self.cnn = ResNet(last_stride=cfg.MODEL.LAST_STRIDE, block=Bottleneck, layers=[3,4,6,3])
-        # 单独为 CNN 分支加载预训练权重（使用 resnet50-0676ba61.pth）
-        if cfg.MODEL.PRETRAIN_CHOICE == 'imagenet':
-            cnn_pretrain_path = cfg.MODEL.CNN_PRETRAIN_PATH if cfg.MODEL.CNN_PRETRAIN_PATH else cfg.MODEL.PRETRAIN_PATH
-            self.cnn.load_param(cnn_pretrain_path)
-            print(f'Loading pretrained ResNet model from {cnn_pretrain_path}')
+        # 2. CNN 分支（OSNet）
+        self.cnn = torchreid.models.osnet.osnet_x1_0(pretrained=False)
+        self.cnn.classifier = nn.Identity()
+        cnn_weights_path = cfg.MODEL.CNN_PRETRAIN_PATH
+        if cnn_weights_path and os.path.exists(cnn_weights_path):
+            state_dict = torch.load(cnn_weights_path, map_location='cpu')
+            new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+            self.cnn.load_state_dict(new_state_dict, strict=False)
+            print(f'✅ Loaded OSNet weights from {cnn_weights_path}')
 
-        # 3. 用于映射 CNN 全局特征到 Transformer 维度的线性层
-        self.proj_cnn_shallow = nn.Linear(512, 768)   # stage2 输出通道 512 -> 768
-        self.proj_cnn_mid = nn.Linear(1024, 768)      # stage3 输出通道 1024 -> 768
-        self.proj_cnn_deep = nn.Linear(2048, 768)     # stage4 输出通道 2048 -> 768
+        # 注册 hooks
+        self.cnn_stage_features = {}
+        def get_hook(name):
+            def hook(module, input, output):
+                self.cnn_stage_features[name] = output
+            return hook
+        self.cnn.conv2.register_forward_hook(get_hook('conv2'))
+        self.cnn.conv3.register_forward_hook(get_hook('conv3'))
+        self.cnn.conv4.register_forward_hook(get_hook('conv4'))
 
-        # 4. 跨纬度多尺度特征融合模块
-        self.fusion_shallow = CrossDimensionalMultiScaleFusion(
-            in_channels_trans=768, in_channels_cnn=512,
-            out_channels_trans=768, out_channels_cnn=512
-        )
-        self.fusion_mid = CrossDimensionalMultiScaleFusion(
-            in_channels_trans=768, in_channels_cnn=1024,
-            out_channels_trans=768, out_channels_cnn=1024
-        )
-        self.fusion_deep = CrossDimensionalMultiScaleFusion(
-            in_channels_trans=768, in_channels_cnn=2048,
-            out_channels_trans=768, out_channels_cnn=2048
-        )
+        # 3. 投影层（可选，融合模块内部已处理）
+        self.proj_cnn_shallow = nn.Linear(256, 768)
+        self.proj_cnn_mid = nn.Linear(384, 768)
+        self.proj_cnn_deep = nn.Linear(512, 768)
+
+        # 4. 融合模块
+        self.fusion_shallow = CrossDimensionalMultiScaleFusion(768, 256, 768, 256)
+        self.fusion_mid    = CrossDimensionalMultiScaleFusion(768, 384, 768, 384)
+        self.fusion_deep   = CrossDimensionalMultiScaleFusion(768, 512, 768, 512)
 
         # JPM 模块（参考 build_transformer_local）
         block = self.transformer.blocks[-1]  # 使用最后一个 Transformer 块
@@ -596,9 +598,13 @@ class HybridModel(nn.Module):
         self.classifier.apply(weights_init_classifier)
 
     def forward(self, x, label=None, cam_label=None, view_label=None):
-        # 1. 获取原始特征
-        trans_features = self.transformer.forward_features(x, cam_label, view_label)  # 列表 [layer3, layer5, last]
-        cnn_features = self.cnn(x)  # 列表 [f2, f3, f4]
+        trans_features = self.transformer.forward_features(x, cam_label, view_label)
+        self.cnn_stage_features.clear()
+        _ = self.cnn(x)
+
+        cnn_shallow = self.cnn_stage_features['conv2']  # 256 通道
+        cnn_mid    = self.cnn_stage_features['conv3']  # 384 通道
+        cnn_deep   = self.cnn_stage_features['conv4']  # 512 通道
 
         B, N, D = trans_features[0].shape
         H_t, W_t = self.trans_hw
@@ -608,7 +614,6 @@ class HybridModel(nn.Module):
 
         # ---------- 浅层融合 (layer3 + stage2) ----------
         trans_spatial = trans_features[0][:, 1:, :].transpose(1, 2).reshape(B, D, H_t, W_t)
-        cnn_shallow = cnn_features[0]
         trans_enhanced, cnn_enhanced_shallow = self.fusion_shallow(trans_spatial, cnn_shallow)
 
         trans_seq_shallow = trans_enhanced.flatten(2).transpose(1, 2)
@@ -617,7 +622,6 @@ class HybridModel(nn.Module):
 
         # ---------- 中层融合 (layer5 + stage3) ----------
         mid_spatial = trans_seq_shallow[:, 1:, :].transpose(1, 2).reshape(B, D, H_t, W_t)
-        cnn_mid = cnn_features[1]
         trans_enhanced_mid, cnn_enhanced_mid = self.fusion_mid(mid_spatial, cnn_mid)
 
         trans_seq_mid = trans_enhanced_mid.flatten(2).transpose(1, 2)
@@ -626,7 +630,6 @@ class HybridModel(nn.Module):
 
         # ---------- 深层融合 (last + stage4) ----------
         deep_spatial = trans_seq_mid[:, 1:, :].transpose(1, 2).reshape(B, D, H_t, W_t)
-        cnn_deep = cnn_features[2]
         trans_enhanced_deep, cnn_enhanced_deep = self.fusion_deep(deep_spatial, cnn_deep)
 
         trans_seq_deep = trans_enhanced_deep.flatten(2).transpose(1, 2)

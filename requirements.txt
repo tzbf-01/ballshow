@@ -7,3 +7,5 @@ numpy==1.24.3
 matplotlib==3.7.2
 tqdm==4.66.1
 tensorboard==2.13.0
+torchreid == 0.2.5
+PySocks-1.7.1 beautifulsoup4-4.14.3 gdown-6.0.0 soupsieve-2.8.3

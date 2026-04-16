@@ -3,9 +3,9 @@ MODEL:
   SHIFT_NUM: 5                   # 已继承默认，可不写，但显式更清晰
   DROP_PATH: 0.1                 # 保持默认
   PRETRAIN_CHOICE: 'imagenet'
-  PRETRAIN_PATH: 'jx_vit_base_p16_224-80ecf9dd.pth'  # 预训练权重路径
-  TRANSFORMER_FINETUNE_PATH: 'BallShow-TransReID_Checkpoint.pth'  # baseline 权重路径
-  CNN_PRETRAIN_PATH: './resnet50-0676ba61.pth'
+  PRETRAIN_PATH: './jx_vit_base_p16_224-80ecf9dd.pth'  # 预训练权重路径
+  TRANSFORMER_FINETUNE_PATH: './BallShow-TransReID_Checkpoint.pth'  # baseline 权重路径
+  CNN_PRETRAIN_PATH: './osnet_x1_0_imagenet.pth'
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'
   IF_WITH_CENTER: 'no'
@@ -27,9 +27,9 @@ MODEL:
 INPUT:
   SIZE_TRAIN: [256, 128]
   SIZE_TEST: [256, 128]
-  PROB: 0.5 # random horizontal flip
-  RE_PROB: 0.5 # random erasing
-  PADDING: 10
+  PROB: 0.5 
+  RE_PROB: 0.5 
+  PADDING: 10 
   PIXEL_MEAN: [0.5, 0.5, 0.5]
   PIXEL_STD: [0.5, 0.5, 0.5]
 
@@ -45,18 +45,18 @@ DATALOADER:
 SOLVER:
   OPTIMIZER_NAME: 'SGD'
   MAX_EPOCHS: 150
-  BASE_LR: 0.008
+  BASE_LR: 0.01
   IMS_PER_BATCH: 64
   WARMUP_METHOD: 'linear'
   LARGE_FC_LR: False
   CHECKPOINT_PERIOD: 120
   LOG_PERIOD: 50
   EVAL_PERIOD: 10
-  WEIGHT_DECAY:  1e-4
+  WEIGHT_DECAY:  5e-4
   WEIGHT_DECAY_BIAS: 1e-4
   BIAS_LR_FACTOR: 2
   MARGIN: 0.3    # triplet loss margin
-  WARMUP_EPOCHS: 5
+  WARMUP_EPOCHS: 10
 
 TEST:
   EVAL: True
